@@ -13,6 +13,11 @@ import type { ImageSize, PrintingEntry, TokenSearchFilters } from "../services/s
 import { usePreferencesStore, registerStrategyCacheClearFn } from "../stores/preferencesStore.ts";
 import type { ArtChainEntry } from "../stores/preferencesStore.ts";
 
+export interface SourcePrinting {
+  setCode: string;
+  collectorNumber: string;
+}
+
 interface UseCardImageOptions {
   size?: "small" | "normal" | "large" | "art_crop";
   faceIndex?: number;
@@ -31,6 +36,10 @@ interface UseCardImageOptions {
    * picker to preview a specific printing's art. Requires `oracleId` to
    * look up the printings list. */
   scryfallId?: string;
+  /** Source printing context from a draft pack or imported deck list. When
+   * the art chain contains a `source_printing` entry, this set+collector
+   * pair is matched against the printings list. Falls through when absent. */
+  sourcePrinting?: SourcePrinting;
 }
 
 interface UseCardImageResult {
@@ -56,7 +65,11 @@ registerStrategyCacheClearFn(() => {
   strategyInflight.clear();
 });
 
-function applyChainEntry(entry: ArtChainEntry, printings: PrintingEntry[]): PrintingEntry | null {
+function applyChainEntry(
+  entry: ArtChainEntry,
+  printings: PrintingEntry[],
+  source?: SourcePrinting,
+): PrintingEntry | null {
   switch (entry.type) {
     case "set":
       return printings.find((p) => p.set === entry.setCode) ?? null;
@@ -68,13 +81,16 @@ function applyChainEntry(entry: ArtChainEntry, printings: PrintingEntry[]): Prin
       return printings.find((p) => p.border_color === "borderless") ?? null;
     case "prefer_extended":
       return printings.find((p) => p.frame_effects.includes("extendedart")) ?? null;
+    case "source_printing":
+      if (!source) return null;
+      return printings.find((p) => p.set === source.setCode && p.collector_number === source.collectorNumber) ?? null;
   }
 }
 
-function applyChain(chain: ArtChainEntry[], printings: PrintingEntry[]): PrintingEntry | null {
+function applyChain(chain: ArtChainEntry[], printings: PrintingEntry[], source?: SourcePrinting): PrintingEntry | null {
   if (printings.length === 0) return null;
   for (const entry of chain) {
-    const match = applyChainEntry(entry, printings);
+    const match = applyChainEntry(entry, printings, source);
     if (match) return match;
   }
   return null;
@@ -216,6 +232,7 @@ export function useCardImage(
   const oracleId = options?.oracleId ?? "";
   const faceName = options?.faceName ?? "";
   const scryfallId = options?.scryfallId ?? "";
+  const sourcePrinting = options?.sourcePrinting;
   const filterPower = tokenFilters?.power ?? null;
   const filterToughness = tokenFilters?.toughness ?? null;
   const filterColors = tokenFilters?.colors?.join(",") ?? "";
@@ -242,11 +259,23 @@ export function useCardImage(
     } else if (artOverrides[resolvedOracleId]) {
       overrideUrl = resolveOverrideUrl(resolvedOracleId, artOverrides[resolvedOracleId].scryfallId, faceIndex, size);
     } else if (artChain.length > 0) {
-      const cached = strategyCacheMap.get(resolvedOracleId);
-      if (cached) {
-        overrideUrl = resolvePrintingImageUrl(cached, faceIndex, size);
+      if (sourcePrinting && artChain.some((e) => e.type === "source_printing")) {
+        const printings = printingsCacheMap.get(resolvedOracleId);
+        if (printings) {
+          const winner = applyChain(artChain, printings, sourcePrinting);
+          if (winner) {
+            overrideUrl = resolvePrintingImageUrl(winner, faceIndex, size);
+          }
+        } else {
+          resolveStrategyInBackground(resolvedOracleId, artChain);
+        }
       } else {
-        resolveStrategyInBackground(resolvedOracleId, artChain);
+        const cached = strategyCacheMap.get(resolvedOracleId);
+        if (cached) {
+          overrideUrl = resolvePrintingImageUrl(cached, faceIndex, size);
+        } else {
+          resolveStrategyInBackground(resolvedOracleId, artChain);
+        }
       }
     }
   }

@@ -21,7 +21,10 @@ function PackCard({
   onConfirm,
   onHover,
 }: PackCardProps) {
-  const { src, isLoading } = useCardImage(card.name, { size: "normal" });
+  const { src, isLoading } = useCardImage(card.name, {
+    size: "normal",
+    sourcePrinting: { setCode: card.set_code, collectorNumber: card.collector_number },
+  });
 
   return (
     <div

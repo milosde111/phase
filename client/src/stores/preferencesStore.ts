@@ -38,7 +38,8 @@ export type ArtChainEntry =
   | { type: "newest" }
   | { type: "oldest" }
   | { type: "prefer_borderless" }
-  | { type: "prefer_extended" };
+  | { type: "prefer_extended" }
+  | { type: "source_printing" };
 
 export interface CardArtOverride {
   scryfallId: string;

@@ -821,6 +821,7 @@ function PacingSection({
 }
 
 const ART_CHAIN_RULE_OPTIONS: { type: ArtChainEntry["type"]; label: string }[] = [
+  { type: "source_printing", label: "Source Printing" },
   { type: "newest", label: "Newest Printing" },
   { type: "oldest", label: "Oldest Printing" },
   { type: "prefer_borderless", label: "Prefer Borderless" },
@@ -840,6 +841,7 @@ function artChainEntryLabel(entry: ArtChainEntry): string {
     case "oldest": return "Oldest Printing";
     case "prefer_borderless": return "Prefer Borderless";
     case "prefer_extended": return "Prefer Extended Art";
+    case "source_printing": return "Source Printing";
   }
 }
 
@@ -1007,7 +1009,7 @@ function ArtChainEditor({
       </div>
 
       <p className="text-xs text-slate-500">
-        Rules are tried top-to-bottom. The first match wins. Per-card overrides (right-click in deck builder) always take priority.
+        Rules are tried top-to-bottom. The first match wins. &ldquo;Source Printing&rdquo; uses the set from a draft pack or deck import when available. Per-card overrides (right-click in deck builder) always take priority.
       </p>
     </div>
   );

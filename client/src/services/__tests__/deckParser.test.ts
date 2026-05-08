@@ -122,7 +122,7 @@ describe('parseMtgaDeck', () => {
   it('parses MTGA format lines into main deck', () => {
     const content = '4 Lightning Bolt (FDN) 123\n2 Counterspell (MKM) 56';
     const result = parseMtgaDeck(content);
-    expect(result.main).toEqual([
+    expect(result.main).toMatchObject([
       { count: 4, name: 'Lightning Bolt' },
       { count: 2, name: 'Counterspell' },
     ]);
@@ -136,7 +136,7 @@ describe('parseMtgaDeck', () => {
 3 Red Elemental Blast (LEA) 166`;
     const result = parseMtgaDeck(content);
     expect(result.main).toHaveLength(2);
-    expect(result.sideboard).toEqual([
+    expect(result.sideboard).toMatchObject([
       { count: 3, name: 'Red Elemental Blast' },
     ]);
   });
@@ -159,11 +159,11 @@ describe('parseMtgaDeck', () => {
 Sideboard
 3 Red Elemental Blast (LEA) 166`;
     const result = parseMtgaDeck(content);
-    expect(result.main).toEqual([
+    expect(result.main).toMatchObject([
       { count: 4, name: 'Lightning Bolt' },
       { count: 2, name: 'Mountain' },
     ]);
-    expect(result.sideboard).toEqual([
+    expect(result.sideboard).toMatchObject([
       { count: 3, name: 'Red Elemental Blast' },
     ]);
   });
@@ -200,7 +200,7 @@ Deck
   it('handles multi-word card names with special characters', () => {
     const content = "2 Lim-Dul's Vault (ALL) 107";
     const result = parseMtgaDeck(content);
-    expect(result.main).toEqual([
+    expect(result.main).toMatchObject([
       { count: 2, name: "Lim-Dul's Vault" },
     ]);
   });
@@ -247,7 +247,7 @@ describe('detectAndParseDeck', () => {
   it('auto-detects MTGA format and parses correctly', () => {
     const mtgaContent = '4 Lightning Bolt (FDN) 123\n2 Counterspell (MKM) 56';
     const result = detectAndParseDeck(mtgaContent);
-    expect(result.main).toEqual([
+    expect(result.main).toMatchObject([
       { count: 4, name: 'Lightning Bolt' },
       { count: 2, name: 'Counterspell' },
     ]);
@@ -303,7 +303,7 @@ Sideboard
     ].join('\n');
 
     const result = detectAndParseDeck(content);
-    expect(result.main).toEqual([
+    expect(result.main).toMatchObject([
       { count: 1, name: 'Arcane Signet' },
       { count: 1, name: 'Arcane Denial' },
       { count: 1, name: 'Mental Misstep' },
@@ -316,7 +316,7 @@ Sideboard
 1 Sol Ring (SOC) 128`;
     const result = detectAndParseDeck(content);
     expect(result.commander).toEqual(['Zimone, Infinite Analyst']);
-    expect(result.main).toEqual([{ count: 1, name: 'Sol Ring' }]);
+    expect(result.main).toMatchObject([{ count: 1, name: 'Sol Ring' }]);
   });
 
   it('routes inline *CMDR* annotations on simple lines to the commander slot', () => {
@@ -332,7 +332,7 @@ Sideboard
 1 Sol Ring (SOC) 128`;
     const result = detectAndParseDeck(content);
     expect(result.companion).toBe('Lurrus of the Dream-Den');
-    expect(result.main).toEqual([{ count: 1, name: 'Sol Ring' }]);
+    expect(result.main).toMatchObject([{ count: 1, name: 'Sol Ring' }]);
   });
 
   it('recognizes "Commanders" section header (Archidekt categorized export)', () => {
@@ -343,7 +343,7 @@ Deck
 1 Sol Ring (SOC) 128`;
     const result = detectAndParseDeck(content);
     expect(result.commander).toEqual(['Zimone, Infinite Analyst']);
-    expect(result.main).toEqual([{ count: 1, name: 'Sol Ring' }]);
+    expect(result.main).toMatchObject([{ count: 1, name: 'Sol Ring' }]);
   });
 
   it('removes one matching main-deck copy when a commander is explicit', () => {
@@ -368,6 +368,48 @@ Deck
     });
     expect(result.commander).toEqual(['Zimone, Infinite Analyst']);
     expect(result.main).toEqual([{ count: 1, name: 'Sol Ring' }]);
+  });
+});
+
+describe('sourcePrinting capture', () => {
+  it('captures set code and collector number from MTGA format', () => {
+    const result = parseMtgaDeck('4 Lightning Bolt (FDN) 123');
+    expect(result.main[0]).toEqual({
+      count: 4,
+      name: 'Lightning Bolt',
+      sourcePrinting: { setCode: 'fdn', collectorNumber: '123' },
+    });
+  });
+
+  it('lowercases set codes to match Scryfall printings', () => {
+    const result = parseMtgaDeck('1 Counterspell (MKM) 56');
+    expect(result.main[0].sourcePrinting?.setCode).toBe('mkm');
+  });
+
+  it('omits sourcePrinting for empty set code parens', () => {
+    const result = detectAndParseDeck('1 Three Visits () 315');
+    expect(result.main[0].sourcePrinting).toBeUndefined();
+  });
+
+  it('omits sourcePrinting for simple (non-MTGA) format lines', () => {
+    const result = parseDeckFile('4 Lightning Bolt');
+    expect(result.main[0].sourcePrinting).toBeUndefined();
+  });
+
+  it('preserves sourcePrinting through deduplicateEntries', () => {
+    const content = '2 Lightning Bolt (FDN) 123\n2 Lightning Bolt (FDN) 123';
+    const result = parseMtgaDeck(content);
+    expect(result.main).toHaveLength(1);
+    expect(result.main[0].count).toBe(4);
+    expect(result.main[0].sourcePrinting).toEqual({ setCode: 'fdn', collectorNumber: '123' });
+  });
+
+  it('keeps first sourcePrinting when deduplicating entries from different sets', () => {
+    const content = '2 Lightning Bolt (FDN) 123\n1 Lightning Bolt (A25) 141';
+    const result = parseMtgaDeck(content);
+    expect(result.main).toHaveLength(1);
+    expect(result.main[0].count).toBe(3);
+    expect(result.main[0].sourcePrinting).toEqual({ setCode: 'fdn', collectorNumber: '123' });
   });
 });
 
@@ -443,8 +485,8 @@ describe('resolveCommander waterfall', () => {
 
     const parsed = detectAndParseDeck(content);
     expect(parsed.commander).toBeUndefined();
-    expect(parsed.main).toContainEqual({ count: 1, name: 'Three Visits' });
-    expect(parsed.main[0]).toEqual({ count: 1, name: 'Zimone, Infinite Analyst' });
+    expect(parsed.main).toContainEqual(expect.objectContaining({ count: 1, name: 'Three Visits' }));
+    expect(parsed.main[0]).toMatchObject({ count: 1, name: 'Zimone, Infinite Analyst' });
 
     const resolved = await resolveCommander(parsed);
     expect(resolved.commander).toEqual(['Zimone, Infinite Analyst']);

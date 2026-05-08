@@ -4,6 +4,7 @@ import { useCardImage } from "../../hooks/useCardImage";
 import { usePrintingsLoaded } from "../../hooks/usePrintingsLoaded";
 import { hasAlternatePrintingsSync, resolveOracleIdSync } from "../../services/scryfall";
 import type { DeckEntry, ParsedDeck } from "../../services/deckParser";
+import type { SourcePrinting } from "../../hooks/useCardImage";
 import type { ScryfallCard } from "../../services/scryfall";
 import { usePreferencesStore } from "../../stores/preferencesStore";
 import { DeckCardContextMenu } from "./DeckCardContextMenu";
@@ -27,6 +28,7 @@ interface DeckStackItem {
   section: DeckStackSection;
   typeRank: number;
   sortKey: [number, number, string];
+  sourcePrinting?: SourcePrinting;
 }
 
 interface DeckStackTypeGroup {
@@ -81,6 +83,7 @@ function createDeckStackItems(
     mainItems.push({
       count: entry.count,
       name: entry.name,
+      sourcePrinting: entry.sourcePrinting,
       section: "main",
       typeRank,
       sortKey: [1 + typeRank, card?.cmc ?? 0, entry.name.toLowerCase()],
@@ -94,6 +97,7 @@ function createDeckStackItems(
     sideboardItems.push({
       count: entry.count,
       name: entry.name,
+      sourcePrinting: entry.sourcePrinting,
       section: "sideboard",
       typeRank,
       sortKey: [4 + typeRank, card?.cmc ?? 0, entry.name.toLowerCase()],
@@ -162,7 +166,7 @@ function DeckStackCard({
   onCardHover?: (cardName: string | null, scryfallId?: string) => void;
   onContextMenu?: (cardName: string, x: number, y: number) => void;
 }) {
-  const { src, isLoading } = useCardImage(item.name, { size: "normal" });
+  const { src, isLoading } = useCardImage(item.name, { size: "normal", sourcePrinting: item.sourcePrinting });
   const printingsLoaded = usePrintingsLoaded();
   const oracleId = printingsLoaded ? resolveOracleIdSync(item.name) : null;
   const hasAlternates = oracleId ? hasAlternatePrintingsSync(oracleId) : false;

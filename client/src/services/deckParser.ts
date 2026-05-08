@@ -1,9 +1,11 @@
 import { isCardCommanderEligible } from "./engineRuntime";
 import { BASIC_LAND_NAMES } from "../constants/game";
+import type { SourcePrinting } from "../hooks/useCardImage";
 
 export interface DeckEntry {
   count: number;
   name: string;
+  sourcePrinting?: SourcePrinting;
 }
 
 export interface ParsedDeck {
@@ -92,10 +94,15 @@ function parseDeckEntryLine(line: string): LineParseResult | null {
     annotation = "companion";
   }
 
-  const mtgaMatch = remainder.match(/^(\d+)\s+(.+?)\s+\([A-Z0-9]*\)\s+\S+$/);
+  const mtgaMatch = remainder.match(/^(\d+)\s+(.+?)\s+\(([A-Z0-9]*)\)\s+(\S+)$/);
   if (mtgaMatch) {
+    const setCode = mtgaMatch[3];
+    const collectorNumber = mtgaMatch[4];
+    const sourcePrinting: SourcePrinting | undefined = setCode
+      ? { setCode: setCode.toLowerCase(), collectorNumber }
+      : undefined;
     return {
-      entry: { count: parseInt(mtgaMatch[1], 10), name: mtgaMatch[2].trim() },
+      entry: { count: parseInt(mtgaMatch[1], 10), name: mtgaMatch[2].trim(), sourcePrinting },
       annotation,
     };
   }
@@ -214,11 +221,16 @@ export function repairParsedDeck(deck: ParsedDeck): ParsedDeck {
 }
 
 export function deduplicateEntries(entries: DeckEntry[]): DeckEntry[] {
-  const map = new Map<string, number>();
+  const map = new Map<string, DeckEntry>();
   for (const entry of entries) {
-    map.set(entry.name, (map.get(entry.name) ?? 0) + entry.count);
+    const existing = map.get(entry.name);
+    if (existing) {
+      existing.count += entry.count;
+    } else {
+      map.set(entry.name, { ...entry });
+    }
   }
-  return Array.from(map, ([name, count]) => ({ count, name }));
+  return Array.from(map.values());
 }
 
 /**
