@@ -3448,6 +3448,24 @@ mod tests {
     }
 
     #[test]
+    fn thought_partition_choose_one_of_those_cards_has_no_target_fallback() {
+        let r = parse(
+            "Target opponent reveals all nonland cards in their hand. You may choose one of those cards. If you do, it perpetually becomes white and its mana cost perpetually becomes {5}.",
+            "Thought Partition",
+            &[],
+            &["Sorcery"],
+            &[],
+        );
+        assert!(
+            r.parse_warnings
+                .iter()
+                .all(|warning| !matches!(warning, OracleDiagnostic::TargetFallback { .. })),
+            "unexpected target fallback warnings: {:?}",
+            r.parse_warnings
+        );
+    }
+
+    #[test]
     fn nonmodal_spell_contiguous_resolution_lines_chain_once() {
         let r = parse("Scry 1.\nDraw a card.", "Test Opt", &[], &["Instant"], &[]);
 

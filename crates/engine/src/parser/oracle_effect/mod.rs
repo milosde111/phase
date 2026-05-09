@@ -17934,8 +17934,11 @@ mod tests {
         );
         // First effect: RevealHand with count
         match &*def.effect {
-            Effect::RevealHand { count, .. } => {
+            Effect::RevealHand {
+                count, card_filter, ..
+            } => {
                 assert!(count.is_some(), "Expected dynamic count on RevealHand");
+                assert_eq!(*card_filter, TargetFilter::Any);
             }
             other => panic!("Expected RevealHand, got {:?}", other),
         }
@@ -17976,6 +17979,34 @@ mod tests {
             def.sub_ability.is_some(),
             "discard continuation should remain attached"
         );
+    }
+
+    #[test]
+    fn reveal_hand_all_nonland_then_choose_one_preserves_reveal_filter() {
+        let def = parse_effect_chain(
+            "Target opponent reveals all nonland cards in their hand. You may choose one of those cards. If you do, that player exiles it.",
+            AbilityKind::Spell,
+        );
+
+        let Effect::RevealHand {
+            card_filter,
+            choice_optional,
+            ..
+        } = &*def.effect
+        else {
+            panic!("Expected RevealHand, got {:?}", def.effect);
+        };
+        assert!(
+            *choice_optional,
+            "one-of-those follow-up should still mark the choice optional"
+        );
+        assert!(matches!(
+            card_filter,
+            TargetFilter::Typed(tf)
+                if tf.type_filters
+                    .iter()
+                    .any(|filter| matches!(filter, TypeFilter::Non(inner) if **inner == TypeFilter::Land))
+        ));
     }
 
     #[test]

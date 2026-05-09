@@ -179,7 +179,7 @@ pub(crate) enum ContinuationAst {
         attach_to_source: bool,
     },
     RevealHandFilter {
-        card_filter: TargetFilter,
+        card_filter: Option<TargetFilter>,
         choice_optional: bool,
     },
     ManaRestriction {
@@ -705,7 +705,9 @@ pub(crate) enum HandRevealImperativeAst {
     LookAt {
         target: TargetFilter,
     },
-    RevealAll,
+    RevealAll {
+        card_filter: TargetFilter,
+    },
     /// "reveals a number of cards from their hand equal to X" (CR 701.20a).
     RevealPartial {
         count: crate::types::ability::QuantityExpr,

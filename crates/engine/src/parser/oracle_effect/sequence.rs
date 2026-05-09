@@ -742,7 +742,13 @@ pub(super) fn apply_clause_continuation(
                 ..
             } = &mut *previous.effect
             {
-                *existing = card_filter;
+                match card_filter {
+                    Some(filter) => *existing = filter,
+                    None if matches!(existing, TargetFilter::None) => {
+                        *existing = TargetFilter::Any;
+                    }
+                    None => {}
+                }
                 *existing_choice_optional = choice_optional;
             }
         }
@@ -1326,13 +1332,28 @@ pub(super) fn parse_followup_continuation_ast(
                 || nom_primitives::scan_contains(&lower, "one of them")
                 || nom_primitives::scan_contains(&lower, "one of those") =>
         {
-            let card_filter = if alt((tag::<_, _, OracleError<'_>>("you choose "), tag("choose ")))
-                .parse(lower.as_str())
-                .is_ok()
+            let card_filter = if nom_primitives::scan_at_word_boundaries(&lower, |input| {
+                alt((
+                    tag::<_, _, OracleError<'_>>("one of them"),
+                    tag("one of those"),
+                ))
+                .parse(input)
+            })
+            .is_some()
             {
-                super::parse_choose_filter(&lower, ctx)
+                None
+            } else if alt((
+                tag::<_, _, OracleError<'_>>("you may choose "),
+                tag("you choose "),
+                tag("may choose "),
+                tag("choose "),
+            ))
+            .parse(lower.as_str())
+            .is_ok()
+            {
+                Some(super::parse_choose_filter(&lower, ctx))
             } else {
-                super::parse_choose_filter_from_sentence(&lower, ctx)
+                Some(super::parse_choose_filter_from_sentence(&lower, ctx))
             };
             let choice_optional = alt((
                 tag::<_, _, OracleError<'_>>("you may choose "),
