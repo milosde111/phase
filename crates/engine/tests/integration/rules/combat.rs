@@ -725,8 +725,8 @@ fn norns_annex_decline_drops_taxed_attackers() {
 }
 
 // ---------------------------------------------------------------------------
-// CR 506.3 + CR 611.3a + CR 118.12a: Archangel of Tithes (#309) and
-// Propaganda multiplayer (#302) — end-to-end regression coverage.
+// CR 508.1d + CR 508.1h + CR 611.3a + CR 118.12a: Archangel of Tithes (#309)
+// and Propaganda multiplayer (#302) — end-to-end regression coverage.
 //
 // These integration tests exercise the full DeclareAttackers → CombatTaxPayment
 // → PayCombatTax pipeline using the real parsed Oracle text for each card.
@@ -759,7 +759,7 @@ fn add_archangel_of_tithes(scenario: &mut GameScenario, player: PlayerId) -> Obj
     builder.id()
 }
 
-/// CR 506.3 + CR 611.3a + CR 118.12a: Issue #309 regression — Archangel of
+/// CR 508.1d + CR 508.1h + CR 118.12a: Issue #309 regression — Archangel of
 /// Tithes' first static taxes opponent attacks against its controller while it
 /// is untapped. Engine must pause with a `CombatTaxPayment` of `{1}` per
 /// attacker, scoped to attacks against the Archangel's controller.
@@ -796,8 +796,8 @@ fn archangel_of_tithes_untapped_taxes_opponent_attacks() {
     }
 }
 
-/// CR 506.3 + CR 611.3a + CR 611.2b: Tapped Archangel of Tithes' attack-tax
-/// gate (`Not(SourceIsTapped)`) fails, so the tax is dormant and the attack
+/// CR 611.3a + CR 118.12a: Tapped Archangel of Tithes' attack-tax gate
+/// (`Not(SourceIsTapped)`) fails, so the tax is dormant and the attack
 /// proceeds without pausing. Mirrors the unit test
 /// `compute_attack_tax_archangel_of_tithes_gated_by_untapped` at the
 /// integration level.
@@ -835,10 +835,10 @@ fn archangel_of_tithes_tapped_does_not_tax() {
     assert_eq!(state.combat.as_ref().unwrap().attackers.len(), 1);
 }
 
-/// CR 506.3 + CR 506.3 affected-controller scope: Archangel of Tithes'
-/// "Opponent" affected filter excludes the Archangel controller's own
-/// creatures, so the Archangel controller can attack with their own bear (and
-/// the Archangel itself, were it not the source) without paying the tax.
+/// CR 109.5 + CR 508.1d: "you" on Archangel of Tithes refers to its
+/// controller, and the static's `Opponent` affected filter excludes that
+/// controller's own creatures. The Archangel's controller can attack their
+/// own opponent without paying the tax.
 #[test]
 fn archangel_of_tithes_controller_can_attack_own_creatures_without_tax() {
     let mut scenario = GameScenario::new();
@@ -884,21 +884,31 @@ fn add_propaganda(scenario: &mut GameScenario, player: PlayerId) -> ObjectId {
 
 /// Build a 3-player scenario where P1 is the active attacker, Propaganda is on
 /// `propaganda_owner`'s battlefield, and P1 controls a single Bear ready to
-/// attack. The runner is parked in `DeclareAttackers` with priority on P1 so
+/// attack. The runner is parked in `WaitingFor::DeclareAttackers` so
 /// `GameAction::DeclareAttackers` fires immediately.
 fn build_3p_propaganda_scenario(propaganda_owner: PlayerId) -> (GameRunner, ObjectId) {
     let mut scenario = GameScenario::new_n_player(3, 42);
-    // Active attacker is P1 — set BEFORE `at_phase`, which uses `active_player`
-    // to seed `waiting_for` and `priority_player`.
-    scenario.state_mut().active_player = P1;
-    scenario.at_phase(Phase::DeclareAttackers);
     let _propaganda = add_propaganda(&mut scenario, propaganda_owner);
     let attacker = scenario.add_creature(P1, "Bear", 2, 2).id();
-    let runner = scenario.build();
+    let mut runner = scenario.build();
+    // Active attacker is P1; jump straight into the declare-attackers waiting
+    // state so the test exercises only the tax pause path. The valid_*
+    // collections are advisory legality hints; the engine re-validates on
+    // submission via `validate_attackers`.
+    let state = runner.state_mut();
+    state.active_player = P1;
+    state.priority_player = P1;
+    state.phase = Phase::DeclareAttackers;
+    state.turn_number = 2;
+    state.waiting_for = WaitingFor::DeclareAttackers {
+        player: P1,
+        valid_attacker_ids: vec![attacker],
+        valid_attack_targets: vec![AttackTarget::Player(P0), AttackTarget::Player(PlayerId(2))],
+    };
     (runner, attacker)
 }
 
-/// CR 506.3 + CR 508.1d: Issue #302 regression — in a 3-player game, Player A
+/// CR 508.1d + CR 109.5: Issue #302 regression — in a 3-player game, Player A
 /// controls Propaganda, Player B (active) attacks Player C. Propaganda's
 /// `defended` filter (its own controller, Player A) does NOT match Player C,
 /// so the tax must NOT fire.
@@ -923,9 +933,9 @@ fn propaganda_does_not_tax_attacks_against_other_opponents_3p() {
     assert_eq!(state.combat.as_ref().unwrap().attackers.len(), 1);
 }
 
-/// CR 506.3 + CR 508.1d: Sanity companion to #302 — in the same 3-player setup,
-/// when Player B attacks Player A (Propaganda's controller), the tax DOES
-/// fire and the engine pauses with `CombatTaxPayment` of `{2}`.
+/// CR 508.1d + CR 508.1h: Sanity companion to #302 — in the same 3-player
+/// setup, when Player B attacks Player A (Propaganda's controller), the tax
+/// DOES fire and the engine pauses with `CombatTaxPayment` of `{2}`.
 #[test]
 fn propaganda_taxes_attacks_against_its_controller_3p() {
     let (mut runner, attacker) = build_3p_propaganda_scenario(P0);
