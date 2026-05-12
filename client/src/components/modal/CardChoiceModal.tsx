@@ -171,7 +171,7 @@ export function CardChoiceModal() {
       return <SearchModal data={waitingFor.data} />;
     case "OutsideGameChoice":
       if (!canActForWaitingState) return null;
-      return <OutsideGameModal data={waitingFor.data} />;
+      return <OutsideGameModal key={outsideGameChoiceKey(waitingFor.data)} data={waitingFor.data} />;
     case "ChooseFromZoneChoice":
       if (!canActForWaitingState) return null;
       return <ChooseFromZoneModal data={waitingFor.data} />;
@@ -920,6 +920,13 @@ function OutsideGameModal({ data }: { data: OutsideGameChoice["data"] }) {
       </div>
     </ChoiceOverlay>
   );
+}
+
+function outsideGameChoiceKey(data: OutsideGameChoice["data"]) {
+  const choicesKey = data.choices
+    .map((choice) => `${choice.sideboard_index}:${choice.entry.count}`)
+    .join(",");
+  return `${data.player}:${data.count}:${data.up_to ?? false}:${data.destination}:${choicesKey}`;
 }
 
 // ── Choose From Zone Modal ───────────────────────────────────────────────────
