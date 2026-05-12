@@ -652,6 +652,15 @@ fn parse_typed_counter_noun(input: &str) -> OracleResult<'_, CounterMatch> {
             nom::error::ErrorKind::Fail,
         )));
     }
+    if type_slice
+        .chars()
+        .any(|c| matches!(c, ',' | '.' | ';' | ':'))
+    {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
     let (rest, _) =
         preceded(tag(" "), alt((tag("counters"), tag("counter")))).parse(rest_after_noun)?;
     let ct = crate::types::counter::parse_counter_type(type_slice);
@@ -5170,6 +5179,29 @@ mod tests {
         )
         .unwrap();
         assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::DistinctCardTypes {
+                                source: CardTypeSetSource::Zone { .. },
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 4 },
+            } => {}
+            other => panic!("expected zone-scoped DistinctCardTypes GE 4, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn there_are_zone_threshold_stops_before_counter_effect_clause() {
+        let (rest, c) = parse_inner_condition(
+            "there are four or more card types among cards in your graveyard, put three +1/+1 counters on ~",
+        )
+        .unwrap();
+        assert_eq!(rest, ", put three +1/+1 counters on ~");
         match c {
             StaticCondition::QuantityComparison {
                 lhs:
