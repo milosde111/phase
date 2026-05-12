@@ -1355,6 +1355,25 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                 ),
             ]
         }
+        WaitingFor::PairChoice {
+            player, choices, ..
+        } => choices
+            .iter()
+            .map(|&partner| {
+                candidate(
+                    GameAction::ChoosePair {
+                        partner: Some(partner),
+                    },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .chain(std::iter::once(candidate(
+                GameAction::ChoosePair { partner: None },
+                TacticalClass::Selection,
+                Some(*player),
+            )))
+            .collect(),
         // CR 118.12: "Counter unless pays" — opponent chooses pay or decline.
         WaitingFor::UnlessPayment { player, .. } => {
             vec![

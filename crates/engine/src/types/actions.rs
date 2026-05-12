@@ -312,6 +312,11 @@ pub enum GameAction {
     ChooseRingBearer {
         target: ObjectId,
     },
+    /// CR 702.95a + CR 608.2d: Choose a Soulbond partner while the PairWith
+    /// effect is resolving. This is not targeting.
+    ChoosePair {
+        partner: Option<ObjectId>,
+    },
     /// CR 701.49a: Choose which dungeon to venture into.
     ChooseDungeon {
         dungeon: crate::game::dungeon::DungeonId,
@@ -801,6 +806,7 @@ impl GameAction {
             GameAction::PlayFaceDown { object_id, .. } => Some(*object_id),
             GameAction::TurnFaceUp { object_id } => Some(*object_id),
             GameAction::ChooseRingBearer { target } => Some(*target),
+            GameAction::ChoosePair { partner } => *partner,
             GameAction::ChooseDamageSource { source } => Some(*source),
             GameAction::ChooseUntap { object_id, .. } => Some(*object_id),
             GameAction::TapForConvoke { object_id, .. } => Some(*object_id),

@@ -161,6 +161,9 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
                 crate::types::actions::LearnOption::Skip => false,
             }
         }
+        (WaitingFor::PairChoice { choices, .. }, GameAction::ChoosePair { partner }) => {
+            partner.is_some_and(|partner| !choices.contains(&partner))
+        }
         (WaitingFor::DiscoverChoice { .. }, GameAction::DiscoverChoice { .. })
         | (WaitingFor::CascadeChoice { .. }, GameAction::CascadeChoice { .. })
         | (WaitingFor::MulliganDecision { .. }, GameAction::MulliganDecision { .. })

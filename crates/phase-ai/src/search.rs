@@ -334,6 +334,12 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             Some(GameAction::SelectCards { cards: Vec::new() })
         }
 
+        // Soulbond pair choice: choose the first legal partner; if none remain,
+        // decline the pair.
+        WaitingFor::PairChoice { choices, .. } => Some(GameAction::ChoosePair {
+            partner: choices.first().copied(),
+        }),
+
         // Binary accept/decline decisions: decline is always safe.
         WaitingFor::OptionalEffectChoice { .. }
         | WaitingFor::OpponentMayChoice { .. }

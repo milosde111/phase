@@ -4025,9 +4025,9 @@ pub enum Effect {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
     },
-    /// CR 702.95c-d: Pair the source creature with a targeted unpaired
-    /// creature controlled by the same player. Resolution validates both
-    /// permanents are still legal soulbond partners.
+    /// CR 702.95a,c-d + CR 115.10a: Pair the source creature with an unpaired
+    /// creature controlled by the same player. The partner is chosen while
+    /// resolving and is not a target.
     PairWith {
         target: TargetFilter,
     },

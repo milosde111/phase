@@ -427,6 +427,7 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::DamageSourceChoice { .. }
             | WaitingFor::MultiTargetSelection { .. }
             | WaitingFor::OptionalEffectChoice { .. }
+            | WaitingFor::PairChoice { .. }
             | WaitingFor::OpponentMayChoice { .. }
             | WaitingFor::TributeChoice { .. }
             | WaitingFor::DiscoverChoice { .. }

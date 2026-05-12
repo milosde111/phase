@@ -7100,7 +7100,7 @@ mod tests {
         assert_eq!(ability.multi_target, Some(MultiTargetSpec::fixed(0, 4)));
         assert_eq!(
             ability.distribute,
-            Some(DistributionUnit::Counters("+1/+1".to_string()))
+            Some(DistributionUnit::Counters("P1P1".to_string()))
         );
         let Effect::PutCounter {
             counter_type,

@@ -54,6 +54,8 @@ export function getWaitingForObjectChoiceIds(
       return waitingFor.data.valid_targets;
     case "ExploreChoice":
       return waitingFor.data.choosable;
+    case "PairChoice":
+      return waitingFor.data.choices;
     default:
       return [];
   }

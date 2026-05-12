@@ -2724,6 +2724,11 @@ pub(crate) fn extract_target_filter_from_effect(effect: &Effect) -> Option<&Targ
     if matches!(effect, Effect::Sacrifice { .. }) {
         return None;
     }
+    // CR 702.95a + CR 115.10a + CR 608.2d: Soulbond pair choices are not
+    // targets. PairWith computes its legal partner while resolving.
+    if matches!(effect, Effect::PairWith { .. }) {
+        return None;
+    }
     // CR 115.1: ChangeZone from private zones (hand/library) uses resolution-time
     // selection, not stack-push-time targeting.
     if let Effect::ChangeZone { origin, target, .. } = effect {
@@ -2863,11 +2868,19 @@ pub mod tests {
         std::sync::Arc::make_mut(&mut obj.base_static_definitions).push(static_def);
     }
 
-    fn begin_trigger_target_selection(state: &mut GameState) {
-        let wf = crate::game::engine::begin_pending_trigger_target_selection(state)
-            .expect("begin selection")
-            .expect("selection needed");
-        state.waiting_for = wf;
+    fn add_becomes_target_draw_trigger(state: &mut GameState, source: ObjectId) {
+        let trigger = TriggerDefinition::new(TriggerMode::BecomesTarget)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            ))
+            .description("Whenever this creature becomes a target, draw a card.".to_string());
+        let obj = state.objects.get_mut(&source).unwrap();
+        obj.trigger_definitions.push(trigger.clone());
+        std::sync::Arc::make_mut(&mut obj.base_trigger_definitions).push(trigger);
     }
 
     fn resolve_stack_to_optional_choice(state: &mut GameState) {
@@ -2882,7 +2895,7 @@ pub mod tests {
         panic!("stack did not reach OptionalEffectChoice");
     }
 
-    fn accept_optional_effect(state: &mut GameState) {
+    fn accept_optional_effect(state: &mut GameState) -> Vec<GameEvent> {
         assert!(
             matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. }),
             "expected OptionalEffectChoice, got {:?}",
@@ -2892,39 +2905,30 @@ pub mod tests {
             state,
             GameAction::DecideOptionalEffect { accept: true },
         )
-        .expect("accept optional effect");
+        .expect("accept optional effect")
+        .events
     }
 
-    fn resolve_stack_fully(state: &mut GameState) {
-        for _ in 0..20 {
-            if state.stack.is_empty() {
-                return;
-            }
-            crate::game::engine::apply_as_current(state, GameAction::PassPriority)
-                .expect("pass priority");
-            if matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. }) {
-                accept_optional_effect(state);
-            }
-        }
-        panic!("stack did not resolve");
-    }
-
-    fn select_soulbond_target_and_accept(state: &mut GameState, target: ObjectId) {
-        begin_trigger_target_selection(state);
+    fn choose_soulbond_partner(state: &mut GameState, target: ObjectId) -> Vec<GameEvent> {
         assert!(
-            matches!(state.waiting_for, WaitingFor::TriggerTargetSelection { .. }),
-            "expected TriggerTargetSelection, got {:?}",
+            matches!(state.waiting_for, WaitingFor::PairChoice { .. }),
+            "expected PairChoice, got {:?}",
             state.waiting_for
         );
         crate::game::engine::apply_as_current(
             state,
-            GameAction::SelectTargets {
-                targets: vec![TargetRef::Object(target)],
+            GameAction::ChoosePair {
+                partner: Some(target),
             },
         )
-        .expect("select soulbond target");
+        .expect("choose soulbond partner")
+        .events
+    }
+
+    fn select_soulbond_target_and_accept(state: &mut GameState, target: ObjectId) {
         resolve_stack_to_optional_choice(state);
         accept_optional_effect(state);
+        choose_soulbond_partner(state, target);
     }
 
     #[test]
@@ -2984,6 +2988,47 @@ pub mod tests {
     }
 
     #[test]
+    fn soulbond_partner_choice_does_not_become_target() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        let source = make_soulbond_creature(&mut state, PlayerId(0), "Soulbond Source");
+        let partner = make_creature(&mut state, PlayerId(0), "Target Watcher", 1, 1);
+        add_becomes_target_draw_trigger(&mut state, partner);
+
+        process_triggers(
+            &mut state,
+            &[zone_changed_event(
+                source,
+                Zone::Stack,
+                Zone::Battlefield,
+                vec![CoreType::Creature],
+                vec![],
+            )],
+        );
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::TriggerTargetSelection { .. }),
+            "Soulbond must not choose a partner before the trigger is on the stack"
+        );
+        resolve_stack_to_optional_choice(&mut state);
+        let accept_events = accept_optional_effect(&mut state);
+        let choose_events = choose_soulbond_partner(&mut state, partner);
+
+        assert!(
+            accept_events
+                .iter()
+                .chain(choose_events.iter())
+                .all(|event| !matches!(event, GameEvent::BecomesTarget { .. })),
+            "Soulbond partner choice must not emit BecomesTarget"
+        );
+        assert!(
+            !state.stack.iter().any(|entry| entry.source_id == partner),
+            "a becomes-target trigger on the partner must not fire"
+        );
+        assert_eq!(state.objects[&source].paired_with, Some(partner));
+    }
+
+    #[test]
     fn soulbond_other_creature_enters_pairs_with_source() {
         let mut state = setup();
         state.active_player = PlayerId(0);
@@ -3029,6 +3074,7 @@ pub mod tests {
         );
         resolve_stack_to_optional_choice(&mut state);
         accept_optional_effect(&mut state);
+        choose_soulbond_partner(&mut state, partner);
         crate::game::layers::evaluate_layers(&mut state);
 
         assert_eq!(state.objects[&source].power, Some(6));
@@ -3095,13 +3141,13 @@ pub mod tests {
     }
 
     #[test]
-    fn soulbond_invalid_resolution_does_not_pair() {
+    fn soulbond_partner_choice_happens_at_resolution() {
         let mut state = setup();
         state.active_player = PlayerId(0);
         state.priority_player = PlayerId(0);
         let source = make_soulbond_creature(&mut state, PlayerId(0), "Soulbond Source");
         let chosen = make_creature(&mut state, PlayerId(0), "Chosen Partner", 1, 1);
-        let _other = make_creature(&mut state, PlayerId(0), "Other Partner", 1, 1);
+        let other = make_creature(&mut state, PlayerId(0), "Other Partner", 1, 1);
 
         process_triggers(
             &mut state,
@@ -3113,14 +3159,6 @@ pub mod tests {
                 vec![],
             )],
         );
-        begin_trigger_target_selection(&mut state);
-        crate::game::engine::apply_as_current(
-            &mut state,
-            GameAction::SelectTargets {
-                targets: vec![TargetRef::Object(chosen)],
-            },
-        )
-        .expect("select soulbond target");
         state
             .objects
             .get_mut(&chosen)
@@ -3128,10 +3166,20 @@ pub mod tests {
             .card_types
             .core_types
             .retain(|ty| *ty != CoreType::Creature);
-        resolve_stack_fully(&mut state);
+        resolve_stack_to_optional_choice(&mut state);
+        accept_optional_effect(&mut state);
+        match &state.waiting_for {
+            WaitingFor::PairChoice { choices, .. } => {
+                assert!(!choices.contains(&chosen));
+                assert!(choices.contains(&other));
+            }
+            other_waiting => panic!("expected PairChoice, got {other_waiting:?}"),
+        }
+        choose_soulbond_partner(&mut state, other);
 
-        assert_eq!(state.objects[&source].paired_with, None);
+        assert_eq!(state.objects[&source].paired_with, Some(other));
         assert_eq!(state.objects[&chosen].paired_with, None);
+        assert_eq!(state.objects[&other].paired_with, Some(source));
     }
 
     /// CR 111.1 + CR 603.6a: Helper for token creation events — no prior zone.

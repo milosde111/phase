@@ -88,6 +88,7 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "MiracleCastOffer",
     "MadnessCastOffer",
     "TributeChoice",
+    "PairChoice",
     "OpponentMayChoice",
     "OptionalEffectChoice",
     "UnlessPayment",

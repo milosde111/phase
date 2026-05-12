@@ -12,7 +12,6 @@ use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 
 use super::engine::EngineError;
-use super::filter::{matches_target_filter, FilterContext};
 use super::quantity::resolve_quantity_with_targets;
 use super::targeting;
 use super::triggers;
@@ -985,29 +984,7 @@ fn pair_with_legal_choices(
     ability: &ResolvedAbility,
     filter: &TargetFilter,
 ) -> Vec<TargetRef> {
-    if !super::pairing::is_unpaired_creature_you_control(
-        state,
-        ability.source_id,
-        ability.controller,
-    ) {
-        return Vec::new();
-    }
-
-    let ctx = FilterContext::from_source_with_controller(ability.source_id, ability.controller);
-    state
-        .battlefield
-        .iter()
-        .copied()
-        .filter(|&object_id| {
-            matches_target_filter(state, object_id, filter, &ctx)
-                && super::pairing::is_unpaired_creature_you_control(
-                    state,
-                    object_id,
-                    ability.controller,
-                )
-        })
-        .map(TargetRef::Object)
-        .collect()
+    super::pairing::legal_pair_choice_refs(state, ability.source_id, ability.controller, filter)
 }
 
 fn resolve_multi_target_max(

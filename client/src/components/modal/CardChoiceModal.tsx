@@ -33,6 +33,7 @@ type BlightChoice = Extract<WaitingFor, { type: "BlightChoice" }>;
 type ExileForCost = Extract<WaitingFor, { type: "ExileForCost" }>;
 type CollectEvidenceChoice = Extract<WaitingFor, { type: "CollectEvidenceChoice" }>;
 type HarmonizeTapChoice = Extract<WaitingFor, { type: "HarmonizeTapChoice" }>;
+type PairChoice = Extract<WaitingFor, { type: "PairChoice" }>;
 type ChooseLegend = Extract<WaitingFor, { type: "ChooseLegend" }>;
 type CommanderZoneChoice = Extract<WaitingFor, { type: "CommanderZoneChoice" }>;
 type ManifestDreadChoice = Extract<WaitingFor, { type: "ManifestDreadChoice" }>;
@@ -213,6 +214,9 @@ export function CardChoiceModal() {
     case "HarmonizeTapChoice":
       if (!canActForWaitingState) return null;
       return <HarmonizeTapModal data={waitingFor.data} />;
+    case "PairChoice":
+      if (!canActForWaitingState) return null;
+      return <PairChoiceModal data={waitingFor.data} />;
     case "ChooseLegend":
       if (!canActForWaitingState) return null;
       return <LegendChoiceModal data={waitingFor.data} />;
@@ -885,6 +889,57 @@ function ChooseFromZoneModal({
                   </span>
                 </div>
               )}
+            </motion.button>
+          );
+        })}
+      </ScrollableCardStrip>
+    </ChoiceOverlay>
+  );
+}
+
+function PairChoiceModal({ data }: { data: PairChoice["data"] }) {
+  const dispatch = useGameDispatch();
+  const objects = useGameStore((s) => s.gameState?.objects);
+  const hoverProps = useInspectHoverProps();
+
+  const handleChoose = useCallback(
+    (id: ObjectId | null) => {
+      dispatch({
+        type: "ChoosePair",
+        data: { partner: id },
+      });
+    },
+    [dispatch],
+  );
+
+  if (!objects) return null;
+
+  return (
+    <ChoiceOverlay
+      title="Choose Soulbond Partner"
+      subtitle="Pair with an unpaired creature you control"
+      footer={(
+        <div className="mx-auto w-full max-w-xl">
+          <CancelButton onClick={() => handleChoose(null)} label="Decline" />
+        </div>
+      )}
+    >
+      <ScrollableCardStrip>
+        {data.choices.map((id) => {
+          const obj = objects[id];
+          if (!obj) return null;
+          return (
+            <motion.button
+              key={id}
+              type="button"
+              className="relative flex-shrink-0 rounded-lg border-2 border-transparent transition hover:border-emerald-400"
+              onClick={() => handleChoose(id)}
+              {...hoverProps(id)}
+            >
+              <CardImage
+                {...objectImageProps(obj)}
+                className={CHOICE_CARD_IMAGE_CLASS}
+              />
             </motion.button>
           );
         })}

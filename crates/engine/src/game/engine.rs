@@ -1,9 +1,7 @@
 use rand::Rng;
 use thiserror::Error;
 
-#[cfg(test)]
-use crate::types::ability::EffectKind;
-use crate::types::ability::{KeywordAction, TargetRef};
+use crate::types::ability::{EffectKind, KeywordAction, TargetRef};
 use crate::types::actions::GameAction;
 use crate::types::events::{BendingType, GameEvent};
 use crate::types::game_state::{
@@ -1849,6 +1847,35 @@ fn apply_action(
         // CR 609.3: Player decided whether to perform an optional effect ("You may X").
         (WaitingFor::OptionalEffectChoice { .. }, GameAction::DecideOptionalEffect { accept }) => {
             engine_payment_choices::handle_optional_effect_choice(state, accept, &mut events)?
+        }
+        (
+            WaitingFor::PairChoice {
+                player,
+                source_id,
+                choices,
+            },
+            GameAction::ChoosePair { partner },
+        ) => {
+            if let Some(partner_id) = partner {
+                if !choices.contains(&partner_id) {
+                    return Err(EngineError::InvalidAction(
+                        "Selected Soulbond partner is not legal".to_string(),
+                    ));
+                }
+                if super::pairing::is_unpaired_creature_you_control(state, *source_id, *player)
+                    && super::pairing::is_unpaired_creature_you_control(state, partner_id, *player)
+                {
+                    super::pairing::pair_objects(state, *source_id, partner_id);
+                }
+            }
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::PairWith,
+                source_id: *source_id,
+            });
+            state.waiting_for = WaitingFor::Priority { player: *player };
+            state.priority_player = *player;
+            effects::drain_pending_continuation(state, &mut events);
+            state.waiting_for.clone()
         }
         (
             waiting_for @ WaitingFor::OptionalEffectChoice { .. },

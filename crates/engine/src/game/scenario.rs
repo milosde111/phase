@@ -1168,6 +1168,7 @@ impl GameRunner {
             WaitingFor::MultiTargetSelection { .. } => "MultiTargetSelection",
             WaitingFor::AbilityModeChoice { .. } => "AbilityModeChoice",
             WaitingFor::OptionalEffectChoice { .. } => "OptionalEffectChoice",
+            WaitingFor::PairChoice { .. } => "PairChoice",
             WaitingFor::OpponentMayChoice { .. } => "OpponentMayChoice",
             WaitingFor::TributeChoice { .. } => "TributeChoice",
             WaitingFor::UnlessPayment { .. } => "UnlessPayment",

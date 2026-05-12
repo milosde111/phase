@@ -770,6 +770,7 @@ export type WaitingFor =
   | { type: "CollectEvidenceChoice"; data: { player: PlayerId; minimum_mana_value: number; cards: ObjectId[]; resume: unknown } }
   | { type: "HarmonizeTapChoice"; data: { player: PlayerId; eligible_creatures: ObjectId[]; pending_cast: PendingCast } }
   | { type: "OptionalEffectChoice"; data: { player: PlayerId; source_id: ObjectId; description?: string; may_trigger_key?: MayTriggerAutoChoiceKey } }
+  | { type: "PairChoice"; data: { player: PlayerId; source_id: ObjectId; choices: ObjectId[] } }
   | { type: "OpponentMayChoice"; data: { player: PlayerId; source_id: ObjectId; description?: string; remaining: PlayerId[] } }
   | { type: "UnlessPayment"; data: { player: PlayerId; cost: UnlessCost; pending_effect: unknown; trigger_event?: unknown; effect_description?: string } }
   | { type: "WardDiscardChoice"; data: { player: PlayerId; cards: ObjectId[]; pending_effect: unknown } }
@@ -943,6 +944,7 @@ export type GameAction =
   | { type: "SelectCards"; data: { cards: ObjectId[] } }
   | { type: "SelectTargets"; data: { targets: TargetRef[] } }
   | { type: "ChooseTarget"; data: { target: TargetRef | null } }
+  | { type: "ChoosePair"; data: { partner: ObjectId | null } }
   | { type: "ChooseReplacement"; data: { index: number } }
   | { type: "CancelCast" }
   | { type: "Equip"; data: { equipment_id: ObjectId; target_id: ObjectId } }

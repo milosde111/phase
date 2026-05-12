@@ -9,8 +9,8 @@ use crate::types::ability::{
     Duration, Effect, FilterProp, KickerVariant, ManaContribution, ManaProduction,
     ModalSelectionCondition, ModalSelectionConstraint, NinjutsuVariant, ObjectScope, PtValue,
     QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition, RuntimeHandler,
-    SearchSelectionConstraint, StaticDefinition, TargetFilter, TriggerCondition, TriggerDefinition,
-    TypeFilter, TypedFilter, UnlessPayModifier,
+    SearchSelectionConstraint, StaticDefinition, TargetChoiceTiming, TargetFilter,
+    TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
 };
 use crate::types::card::{CardFace, CardLayout};
 use crate::types::card_type::{CardType, CoreType, Supertype};
@@ -1557,6 +1557,7 @@ fn build_soulbond_triggers() -> Vec<TriggerDefinition> {
             target: another_unpaired_creature_you_control(),
         },
     )
+    .target_choice_timing(TargetChoiceTiming::Resolution)
     .optional();
     let pair_triggering = AbilityDefinition::new(
         AbilityKind::Spell,
@@ -1564,6 +1565,7 @@ fn build_soulbond_triggers() -> Vec<TriggerDefinition> {
             target: TargetFilter::TriggeringSource,
         },
     )
+    .target_choice_timing(TargetChoiceTiming::Resolution)
     .optional();
 
     vec![

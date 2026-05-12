@@ -1533,6 +1533,13 @@ pub enum WaitingFor {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         may_trigger_key: Option<MayTriggerAutoChoiceKey>,
     },
+    /// CR 702.95a + CR 608.2d: Soulbond partner choice made while the PairWith
+    /// effect resolves. The listed objects are legal choices, not targets.
+    PairChoice {
+        player: PlayerId,
+        source_id: ObjectId,
+        choices: Vec<ObjectId>,
+    },
     /// CR 702.104a: The chosen opponent of a Tribute creature must decide whether
     /// to place the Tribute +1/+1 counters. `source_id` is the entering Tribute
     /// creature; `count` is the number of +1/+1 counters to place on accept. On
@@ -2216,6 +2223,7 @@ impl WaitingFor {
             | WaitingFor::CollectEvidenceChoice { player, .. }
             | WaitingFor::HarmonizeTapChoice { player, .. }
             | WaitingFor::OptionalEffectChoice { player, .. }
+            | WaitingFor::PairChoice { player, .. }
             | WaitingFor::OpponentMayChoice { player, .. }
             | WaitingFor::TributeChoice { player, .. }
             | WaitingFor::UnlessPayment { player, .. }
