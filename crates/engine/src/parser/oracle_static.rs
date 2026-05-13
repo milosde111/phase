@@ -16519,6 +16519,117 @@ mod tests {
         );
     }
 
+    /// Printed-card round-trip tests for the step-end unspent mana class.
+    /// Each test feeds the exact printed Oracle text for the matching clause
+    /// (verified against `client/public/card-data.json`) through the parser
+    /// to confirm the unified `StepEndUnspentMana` variant emerges with the
+    /// right filter and action.
+    #[test]
+    fn card_text_upwelling_players_retention() {
+        // CR 703.4q: Upwelling printed text.
+        use crate::types::mana::StepEndManaAction;
+        let def =
+            parse_static_line("Players don't lose unspent mana as steps and phases end.").unwrap();
+        assert_eq!(
+            def.mode,
+            StaticMode::StepEndUnspentMana {
+                filter: None,
+                action: StepEndManaAction::Retain,
+            }
+        );
+        assert_eq!(def.affected, Some(TargetFilter::Player));
+    }
+
+    #[test]
+    fn card_text_omnath_locus_of_mana_green_retention() {
+        // CR 703.4q: Omnath, Locus of Mana — printed first ability line.
+        // The card's other line ("Omnath gets +1/+1 for each unspent green
+        // mana you have.") is a separate static parsed independently.
+        use crate::types::mana::StepEndManaAction;
+        let def = parse_static_line("You don't lose unspent green mana as steps and phases end.")
+            .unwrap();
+        assert_eq!(
+            def.mode,
+            StaticMode::StepEndUnspentMana {
+                filter: Some(ManaColor::Green),
+                action: StepEndManaAction::Retain,
+            }
+        );
+        assert_eq!(def.affected, Some(TargetFilter::Controller));
+    }
+
+    #[test]
+    fn card_text_horizon_stone_transforms_to_colorless() {
+        // CR 614.1a + CR 703.4q: Horizon Stone printed text.
+        use crate::types::mana::{ManaType, StepEndManaAction};
+        let def = parse_static_line(
+            "If you would lose unspent mana, that mana becomes colorless instead.",
+        )
+        .unwrap();
+        assert_eq!(
+            def.mode,
+            StaticMode::StepEndUnspentMana {
+                filter: None,
+                action: StepEndManaAction::Transform(ManaType::Colorless),
+            }
+        );
+        assert_eq!(def.affected, Some(TargetFilter::Controller));
+    }
+
+    #[test]
+    fn card_text_kruphix_transforms_to_colorless() {
+        // CR 614.1a + CR 703.4q: Kruphix, God of Horizons — the transform
+        // clause printed alongside indestructible / devotion / no-max-hand.
+        // Same Oracle wording as Horizon Stone; the other clauses route
+        // through their own parser paths.
+        use crate::types::mana::{ManaType, StepEndManaAction};
+        let def = parse_static_line(
+            "If you would lose unspent mana, that mana becomes colorless instead.",
+        )
+        .unwrap();
+        assert_eq!(
+            def.mode,
+            StaticMode::StepEndUnspentMana {
+                filter: None,
+                action: StepEndManaAction::Transform(ManaType::Colorless),
+            }
+        );
+    }
+
+    #[test]
+    fn card_text_omnath_locus_of_all_transforms_to_black() {
+        // CR 614.1a + CR 703.4q: Omnath, Locus of All printed text.
+        use crate::types::mana::{ManaType, StepEndManaAction};
+        let def =
+            parse_static_line("If you would lose unspent mana, that mana becomes black instead.")
+                .unwrap();
+        assert_eq!(
+            def.mode,
+            StaticMode::StepEndUnspentMana {
+                filter: None,
+                action: StepEndManaAction::Transform(ManaType::Black),
+            }
+        );
+    }
+
+    #[test]
+    fn card_text_ozai_transforms_to_red() {
+        // CR 614.1a + CR 703.4q: Ozai, the Phoenix King printed text. The
+        // surrounding keyword and as-long-as-flying clauses route through
+        // their own parser paths.
+        use crate::types::mana::{ManaType, StepEndManaAction};
+        let def =
+            parse_static_line("If you would lose unspent mana, that mana becomes red instead.")
+                .unwrap();
+        assert_eq!(
+            def.mode,
+            StaticMode::StepEndUnspentMana {
+                filter: None,
+                action: StepEndManaAction::Transform(ManaType::Red),
+            }
+        );
+    }
+
     #[test]
     fn static_cant_be_equipped_or_enchanted_compound_multi() {
         // CR 701.3 + CR 702.5 + CR 702.6: The compound phrase must emit BOTH
