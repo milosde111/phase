@@ -455,6 +455,34 @@ pub(super) fn handle_copy_target_choice(
         events.extend(delayed_events);
     }
     effects::drain_pending_continuation(state, events);
+    // CR 113.2c + CR 603.3b + CR 707.10: `process_triggers` above may have
+    // paused on an interactive replayed ETB trigger fired by the realized
+    // copy. When it pauses it sets `state.pending_trigger` for the active
+    // instance and stashes any simultaneously-fired siblings into
+    // `state.deferred_triggers`. This mirrors the priority-time
+    // `process_triggers` call site in `engine_priority`, so the resumption
+    // logic must mirror that site exactly (issue #429 — the same failure
+    // mode as #416 on the copy-replacement completion path):
+    //
+    //   1. A distribute-among pause sets `state.waiting_for` directly to
+    //      `WaitingFor::DistributeAmong` (the trigger's targets are already
+    //      assigned). Surface it as-is — re-running target selection would
+    //      double-prompt for targets that are already chosen.
+    //   2. Otherwise a modal / target-selection pause leaves only
+    //      `state.pending_trigger` set; `begin_pending_trigger_target_selection`
+    //      builds the active trigger's `WaitingFor` from it.
+    //
+    // In both cases the `state.deferred_triggers` queue is intentionally left
+    // intact — it is drained by the active trigger's finalize site
+    // (`engine_stack::finalize_trigger_target_selection`,
+    // `engine_modes::handle_triggered_mode_choice`, or the `DistributeAmong`
+    // handler) once the player resolves the active trigger.
+    if matches!(state.waiting_for, WaitingFor::DistributeAmong { .. }) {
+        return Ok(state.waiting_for.clone());
+    }
+    if let Some(waiting_for) = super::engine::begin_pending_trigger_target_selection(state)? {
+        return Ok(waiting_for);
+    }
     Ok(WaitingFor::Priority {
         player: state.active_player,
     })

@@ -13840,6 +13840,185 @@ mod phase_trigger_regression_tests {
         );
     }
 
+    /// Issue #429 — CR 113.2c + CR 603.3b + CR 707.10: When the copy-replacement
+    /// ETB event is replayed by `handle_copy_target_choice`, multiple interactive
+    /// triggers can fire simultaneously. `process_triggers` sets the first as
+    /// `state.pending_trigger` and stashes the rest into `state.deferred_triggers`.
+    /// The handler previously returned `WaitingFor::Priority` unconditionally,
+    /// silently dropping the first trigger's target-selection prompt. The handler
+    /// must hand back the active trigger's `TriggerTargetSelection` instead.
+    #[test]
+    fn copy_target_choice_surfaces_interactive_trigger_prompt_for_deferred_entry() {
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, QuantityExpr, TriggerDefinition, TypedFilter,
+        };
+        use crate::types::triggers::TriggerMode;
+
+        let mut state = GameState::new_two_player(42);
+
+        // Two observers, each with a *targeted* "when a creature enters, deal 1
+        // damage to target creature" ETB trigger. Both watch the replayed
+        // Callidus entry event, so two interactive triggers fire at once.
+        let make_observer = |state: &mut GameState, card: u64| -> ObjectId {
+            let obs = zones::create_object(
+                state,
+                CardId(card),
+                PlayerId(0),
+                format!("Observer {card}"),
+                Zone::Battlefield,
+            );
+            {
+                let obj = state.objects.get_mut(&obs).unwrap();
+                obj.card_types
+                    .core_types
+                    .push(crate::types::card_type::CoreType::Creature);
+                obj.base_power = Some(1);
+                obj.base_toughness = Some(1);
+                obj.power = Some(1);
+                obj.toughness = Some(1);
+                obj.trigger_definitions.push(
+                    TriggerDefinition::new(TriggerMode::ChangesZone)
+                        .execute(AbilityDefinition::new(
+                            AbilityKind::Spell,
+                            Effect::DealDamage {
+                                amount: QuantityExpr::Fixed { value: 1 },
+                                target: TargetFilter::Typed(TypedFilter::creature()),
+                                damage_source: None,
+                            },
+                        ))
+                        .valid_card(TargetFilter::Typed(TypedFilter::creature()))
+                        .destination(Zone::Battlefield),
+                );
+            }
+            obs
+        };
+        let observer_a = make_observer(&mut state, 10);
+        let observer_b = make_observer(&mut state, 11);
+
+        // Copy target on the battlefield.
+        let bear = zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&bear).unwrap();
+            obj.card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Creature);
+            obj.base_power = Some(2);
+            obj.base_toughness = Some(2);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            // CR 707.2: `BecomeCopy` copies the *intrinsic copiable values*
+            // (`base_*` fields), not the layer-derived ones. The bear's
+            // creature type must live on `base_card_types` / `base_name` so the
+            // realized copy is a creature — otherwise the observers' creature-
+            // filtered ETB triggers never match the replayed copy entry.
+            obj.base_card_types = obj.card_types.clone();
+            obj.base_name = obj.name.clone();
+        }
+
+        // Callidus Assassin with a plain BecomeCopy "enter as a copy" replacement.
+        let assassin = zones::create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Callidus Assassin".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&assassin).unwrap();
+            obj.card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Creature);
+            obj.base_power = Some(3);
+            obj.base_toughness = Some(3);
+            obj.power = Some(3);
+            obj.toughness = Some(3);
+            obj.replacement_definitions.push(
+                crate::types::ability::ReplacementDefinition::new(
+                    crate::types::replacements::ReplacementEvent::Moved,
+                )
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::BecomeCopy {
+                        target: TargetFilter::Typed(TypedFilter::creature()),
+                        duration: None,
+                        mana_value_limit: None,
+                        additional_modifications: Vec::new(),
+                    },
+                )),
+            );
+        }
+
+        // Capture a real `ZoneChanged` for Callidus entering, mirroring what the
+        // post-action pipeline stashes when `CopyTargetChoice` is set up.
+        {
+            let mut warmup_events: Vec<GameEvent> = Vec::new();
+            zones::move_to_zone(&mut state, assassin, Zone::Stack, &mut warmup_events);
+            warmup_events.clear();
+            zones::move_to_zone(&mut state, assassin, Zone::Battlefield, &mut warmup_events);
+            let entry_event = warmup_events
+                .into_iter()
+                .find(|e| {
+                    matches!(
+                        e,
+                        GameEvent::ZoneChanged { object_id, to, .. }
+                            if *object_id == assassin && *to == Zone::Battlefield
+                    )
+                })
+                .expect("move_to_zone must emit a ZoneChanged for the entry");
+            state.deferred_entry_events.push(entry_event);
+        }
+        state.waiting_for = WaitingFor::CopyTargetChoice {
+            player: PlayerId(0),
+            source_id: assassin,
+            valid_targets: vec![bear],
+            max_mana_value: None,
+        };
+
+        let waiting = apply_as_current(
+            &mut state,
+            GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(bear)),
+            },
+        )
+        .expect("copy target choice should resolve")
+        .waiting_for;
+
+        // The first interactive trigger's target-selection prompt must be
+        // surfaced — not silently dropped in favor of Priority.
+        assert!(
+            matches!(waiting, WaitingFor::TriggerTargetSelection { .. }),
+            "expected the first interactive ETB trigger's prompt, got {waiting:?}"
+        );
+        assert!(
+            state.pending_trigger.is_some(),
+            "the active interactive trigger must be set as pending_trigger"
+        );
+        // The second simultaneously-fired trigger must be retained in the
+        // deferred queue so it reaches the stack after the first resolves.
+        assert_eq!(
+            state.deferred_triggers.len(),
+            1,
+            "the sibling interactive trigger must be deferred, not dropped"
+        );
+        // Both observers must be the trigger sources (one active, one deferred).
+        let pending_src = state.pending_trigger.as_ref().unwrap().source_id;
+        let deferred_src = state.deferred_triggers[0].pending.source_id;
+        let mut srcs = [pending_src, deferred_src];
+        srcs.sort_by_key(|id| id.0);
+        let mut expected = [observer_a, observer_b];
+        expected.sort_by_key(|id| id.0);
+        assert_eq!(
+            srcs, expected,
+            "both observers' ETB triggers must be accounted for"
+        );
+    }
+
     #[test]
     fn copy_target_choice_rejects_invalid_target() {
         let mut state = GameState::new_two_player(42);
