@@ -1528,6 +1528,19 @@ pub enum ControllerRef {
     /// `combat::defending_player_for_attacker`. Used by intervening-if
     /// quantity checks such as "defending player controls more lands than you."
     DefendingPlayer,
+    /// CR 608.2c + CR 109.4: Filter controller is the player chosen by the
+    /// Nth `Effect::Choose { choice_type: ChoiceType::Player }` in this
+    /// resolving ability chain (`index` is 0-based: 0 = the first choose).
+    /// Distinct from `TargetPlayer` (a target declared when the ability went
+    /// on the stack): a chosen player is selected *during* resolution via the
+    /// `WaitingFor::NamedChoice` round-trip. Resolved by reading
+    /// `ResolvedAbility.chosen_players[index]`, the resolution-scoped list the
+    /// `NamedChoice` answer handler appends to. Powers the
+    /// "choose a player. They <verb> … choose a second player to <verb>"
+    /// card class (Gluntch, the Bestower; the Tempt cycle).
+    ChosenPlayer {
+        index: u8,
+    },
 }
 
 /// CR 301 / CR 303: Kinds of attachments to permanents.
@@ -6080,6 +6093,13 @@ impl TargetFilter {
         if self.references_exiled_by_source() {
             return true;
         }
+        // CR 608.2c + CR 109.4: A player-only reference to a resolution-chosen
+        // player is resolved during resolution (from `ResolvedAbility.
+        // chosen_players`), never declared as a target — so it is a context
+        // ref and surfaces no target slot.
+        if self.chosen_player_index().is_some() {
+            return true;
+        }
         matches!(
             self,
             TargetFilter::None
@@ -6104,6 +6124,25 @@ impl TargetFilter {
                 | TargetFilter::TrackedSet { .. }
                 | TargetFilter::TrackedSetFiltered { .. }
         )
+    }
+
+    /// CR 608.2c + CR 109.4: If this filter is a player-only reference to the
+    /// Nth resolution-chosen player (a type-filter-free `Typed` whose only
+    /// distinguishing property is `controller: ChosenPlayer { index }`), return
+    /// that index. Used by effect-player resolvers to bind a "choose a player
+    /// to <verb>" sub-effect's acting/recipient player without surfacing a
+    /// target slot — the chosen player is fixed during resolution, not at
+    /// target declaration.
+    pub fn chosen_player_index(&self) -> Option<u8> {
+        match self {
+            TargetFilter::Typed(tf) if tf.type_filters.is_empty() && tf.properties.is_empty() => {
+                match tf.controller {
+                    Some(ControllerRef::ChosenPlayer { index }) => Some(index),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
     }
 
     /// Extract the `InZone` zone from this filter's properties, if any.
@@ -9382,6 +9421,17 @@ pub struct ResolvedAbility {
     /// to short-circuit `WaitingFor::TargetSelection` for `Random` abilities.
     #[serde(default, skip_serializing_if = "TargetSelectionMode::is_chosen")]
     pub target_selection_mode: TargetSelectionMode,
+    /// CR 608.2c + CR 109.4: Players chosen by `Effect::Choose { choice_type:
+    /// ChoiceType::Player }` instructions during this resolution, in chain
+    /// order. The `WaitingFor::NamedChoice` answer handler appends to this list
+    /// as each `Choose(Player)` resolves; `ControllerRef::ChosenPlayer { index }`
+    /// reads it. Resolution-scoped (mirrors `chosen_x`): it survives the
+    /// `Choose` → `drain_pending_continuation` → next `Choose` cycle within one
+    /// ability resolution because it travels on the continuation chain, but it
+    /// never leaks across abilities. Distinct-player rulings (Gluntch) read
+    /// this list as the exclusion set when computing the next choice's options.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chosen_players: Vec<PlayerId>,
 }
 
 impl ResolvedAbility {
@@ -9424,6 +9474,7 @@ impl ResolvedAbility {
             ability_index: None,
             may_trigger_origin: None,
             target_selection_mode: TargetSelectionMode::Chosen,
+            chosen_players: Vec::new(),
         }
     }
 
@@ -9511,6 +9562,21 @@ impl ResolvedAbility {
         }
         if let Some(else_branch) = self.else_ability.as_mut() {
             else_branch.set_original_controller_recursive(player);
+        }
+    }
+
+    /// CR 608.2c + CR 109.4: Propagate the resolution-scoped chosen-players
+    /// list across this ability and every sub/else branch. Called by the
+    /// `WaitingFor::NamedChoice` answer handler after appending a freshly
+    /// chosen player, so a later `Choose(Player)` or a `ChosenPlayer { index }`
+    /// reference deeper in the continuation chain sees every earlier choice.
+    pub fn set_chosen_players_recursive(&mut self, players: &[PlayerId]) {
+        self.chosen_players = players.to_vec();
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.set_chosen_players_recursive(players);
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.set_chosen_players_recursive(players);
         }
     }
 

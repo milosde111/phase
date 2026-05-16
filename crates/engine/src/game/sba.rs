@@ -288,6 +288,9 @@ fn static_affects_player(
             Some(ControllerRef::TargetPlayer) => false,
             Some(ControllerRef::ParentTargetController) => false,
             Some(ControllerRef::DefendingPlayer) => false,
+            // CR 109.4: Chosen-player scope has no resolution context here.
+            // Fail closed.
+            Some(ControllerRef::ChosenPlayer { .. }) => false,
             None => true,
         },
         Some(TargetFilter::Player) => true,

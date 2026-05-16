@@ -1337,6 +1337,10 @@ fn resolve_ref(
                             crate::game::combat::defending_player_for_attacker(state, ctx.source)
                                 .is_some_and(|pid| pid == obj.controller)
                         }
+                        // CR 608.2c + CR 109.4: Land controlled by a chosen player.
+                        ControllerRef::ChosenPlayer { index } => ability
+                            .and_then(|a| a.chosen_players.get(*index as usize).copied())
+                            .is_some_and(|pid| pid == obj.controller),
                     };
                     if controller_matches && obj.card_types.core_types.contains(&CoreType::Land) {
                         for subtype in &basic_subtypes {
@@ -1653,6 +1657,10 @@ fn resolve_ref(
                             crate::game::combat::defending_player_for_attacker(state, ctx.source)
                                 .is_some_and(|pid| pid == snap.controller)
                         }
+                        // CR 608.2c + CR 109.4: Attachment controlled by a chosen player.
+                        Some(ControllerRef::ChosenPlayer { index }) => ability
+                            .and_then(|a| a.chosen_players.get(*index as usize).copied())
+                            .is_some_and(|pid| pid == snap.controller),
                     })
                     .count(),
             )
@@ -1698,6 +1706,10 @@ fn damage_source_controller_matches(
             crate::game::combat::defending_player_for_attacker(state, ctx.source)
                 .is_some_and(|player| actual == player)
         }
+        // CR 608.2c + CR 109.4: Damage source controlled by a chosen player.
+        ControllerRef::ChosenPlayer { index } => ability
+            .and_then(|ability| ability.chosen_players.get(*index as usize).copied())
+            .is_some_and(|player| actual == player),
     }
 }
 

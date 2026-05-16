@@ -210,6 +210,11 @@ fn controller_ref_player(
         ControllerRef::DefendingPlayer => {
             crate::game::combat::defending_player_for_attacker(state, source_id)
         }
+        // CR 608.2c + CR 109.4: The player chosen by the Nth `Choose(Player)`
+        // in this resolution — read from the resolution-scoped list.
+        ControllerRef::ChosenPlayer { index } => {
+            ability.and_then(|a| a.chosen_players.get(*index as usize).copied())
+        }
     }
 }
 
@@ -519,6 +524,15 @@ fn filter_inner_for_object(
                             _ => return false,
                         }
                     }
+                    // CR 608.2c + CR 109.4: "a creature they control" following a
+                    // `Choose(Player)` — match the object's controller against the
+                    // resolution-scoped chosen player.
+                    ControllerRef::ChosenPlayer { index } => {
+                        match ability.and_then(|a| a.chosen_players.get(*index as usize).copied()) {
+                            Some(pid) if pid == obj.controller => {}
+                            _ => return false,
+                        }
+                    }
                 }
             }
             // All properties must match
@@ -789,6 +803,14 @@ fn zone_change_filter_inner(
                             _ => return false,
                         }
                     }
+                    // CR 608.2c + CR 109.4: match the spell record's controller
+                    // against the resolution-scoped chosen player.
+                    ControllerRef::ChosenPlayer { index } => {
+                        match ability.and_then(|a| a.chosen_players.get(*index as usize).copied()) {
+                            Some(pid) if pid == record.controller => {}
+                            _ => return false,
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -1046,6 +1068,9 @@ pub fn spell_record_matches_filter(
                     ControllerRef::TargetPlayer => return false,
                     ControllerRef::ParentTargetController => return false,
                     ControllerRef::DefendingPlayer => return false,
+                    // CR 109.4: A chosen-player scope has no meaning for a
+                    // spell-history record (no resolution context). Fail closed.
+                    ControllerRef::ChosenPlayer { .. } => return false,
                 }
             }
 
@@ -1233,6 +1258,9 @@ fn spell_object_matches_filter_inner(
                     ControllerRef::TargetPlayer => return false,
                     ControllerRef::ParentTargetController => return false,
                     ControllerRef::DefendingPlayer => return false,
+                    // CR 109.4: Chosen-player scope is undefined for spell-cast
+                    // history (no resolution context). Fail closed.
+                    ControllerRef::ChosenPlayer { .. } => return false,
                     _ => {}
                 }
             }
@@ -1833,6 +1861,7 @@ fn matches_filter_prop(
                         perm.controller == pid
                     }
                     (Some(ControllerRef::DefendingPlayer), Some(pid)) => perm.controller == pid,
+                    (Some(ControllerRef::ChosenPlayer { .. }), Some(pid)) => perm.controller == pid,
                     (Some(_), None) => false,
                     (None, _) => true,
                 };
@@ -1868,6 +1897,11 @@ fn matches_filter_prop(
                 crate::game::combat::defending_player_for_attacker(state, source.id)
                     .is_some_and(|pid| pid == obj.owner)
             }
+            // CR 608.2c + CR 109.4: Ownership relative to a resolution-chosen player.
+            ControllerRef::ChosenPlayer { index } => source
+                .ability
+                .and_then(|a| a.chosen_players.get(*index as usize).copied())
+                .is_some_and(|pid| pid == obj.owner),
         },
         // CR 303.4 + CR 301.5f: `EnchantedBy` is source-relative when the
         // source is an Aura ("enchanted creature gets +1/+1"). When the source
@@ -2354,6 +2388,11 @@ fn zone_change_record_matches_property(
                 crate::game::combat::defending_player_for_attacker(state, source.id)
                     .is_some_and(|pid| pid == record.owner)
             }
+            // CR 608.2c + CR 109.4: Ownership relative to a resolution-chosen player.
+            ControllerRef::ChosenPlayer { index } => source
+                .ability
+                .and_then(|a| a.chosen_players.get(*index as usize).copied())
+                .is_some_and(|pid| pid == record.owner),
         },
         // CR 701.12: Source's chosen creature type applied to the snapshot subtypes.
         FilterProp::IsChosenCreatureType => source.chosen_creature_type.is_some_and(|chosen| {
@@ -2532,6 +2571,11 @@ fn attachment_controller_matches(
             combat::defending_player_for_attacker(state, source.id)
                 .is_some_and(|pid| pid == attachment_controller)
         }
+        // CR 608.2c + CR 109.4: Attachment controller relative to a chosen player.
+        Some(ControllerRef::ChosenPlayer { index }) => source
+            .ability
+            .and_then(|a| a.chosen_players.get(*index as usize).copied())
+            .is_some_and(|pid| pid == attachment_controller),
     }
 }
 
@@ -2980,6 +3024,9 @@ pub fn player_matches_target_filter(
             Some(ControllerRef::TargetPlayer) => false,
             Some(ControllerRef::ParentTargetController) => false,
             Some(ControllerRef::DefendingPlayer) => false,
+            // CR 109.4: Chosen-player scope has no meaning without resolution
+            // context. Fail closed (mirrors `TargetPlayer`).
+            Some(ControllerRef::ChosenPlayer { .. }) => false,
             None => true,
         },
         // Typed filters with type_filters don't match players

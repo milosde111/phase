@@ -921,8 +921,25 @@ pub(super) fn handle_resolution_choice(
             set_priority(state, priority_player);
             if let Some(cont) = state.pending_continuation.as_mut() {
                 cont.chain.targets = chosen.iter().map(|&id| TargetRef::Object(id)).collect();
-                if let Some(ref mut next_sub) = cont.chain.sub_ability {
-                    next_sub.targets = unchosen.iter().map(|&id| TargetRef::Object(id)).collect();
+                // CR 700.2 + CR 608.2c: The "unchosen" partition is forwarded
+                // to the sub-ability ONLY for the zone-partition pattern
+                // (`ChooseFromZone`: chosen cards go one place, the rest go
+                // another). A counter-placement continuation (Bolster keyword
+                // action; Gluntch's "they put counters on a creature they
+                // control") is NOT a partition — its `sub_ability` is an
+                // independent trailing clause (e.g. the next `Choose`) and
+                // must not have the non-picked objects forced into its target
+                // list. Gate the forward on the continuation's own effect.
+                let is_partition = !matches!(
+                    cont.chain.effect,
+                    crate::types::ability::Effect::PutCounter { .. }
+                        | crate::types::ability::Effect::AddCounter { .. }
+                );
+                if is_partition {
+                    if let Some(ref mut next_sub) = cont.chain.sub_ability {
+                        next_sub.targets =
+                            unchosen.iter().map(|&id| TargetRef::Object(id)).collect();
+                    }
                 }
             }
             effects::drain_pending_continuation(state, events);
@@ -1371,6 +1388,25 @@ pub(super) fn handle_resolution_choice(
             }
 
             state.last_named_choice = ChoiceValue::from_choice(&choice_type, &choice);
+
+            // CR 608.2c + CR 109.4: A `Choose(Player)`/`Choose(Opponent)`
+            // answer binds a resolution-scoped chosen player. Append it to the
+            // pending continuation chain's `chosen_players` so the dependent
+            // effect (`ControllerRef::ChosenPlayer { index }`) and any later
+            // `Choose(Player)` in the same resolution see this choice. The
+            // continuation chain carries the list because it is a
+            // `ResolvedAbility` — unlike `last_named_choice`, which is a
+            // single GameState slot cleared after every drain.
+            if matches!(choice_type, ChoiceType::Player | ChoiceType::Opponent) {
+                if let Ok(pid) = choice.parse::<u8>() {
+                    if let Some(cont) = state.pending_continuation.as_mut() {
+                        let mut chosen = cont.chain.chosen_players.clone();
+                        chosen.push(crate::types::player::PlayerId(pid));
+                        cont.chain.set_chosen_players_recursive(&chosen);
+                    }
+                }
+            }
+
             set_priority(state, player);
             if let Some(pending) = state.pending_cast.take() {
                 if let Some(ability_index) = pending.activation_ability_index {

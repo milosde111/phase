@@ -495,6 +495,17 @@ fn apply_parent_chain_context(
     effect_context_object: Option<&CostPaidObjectSnapshot>,
 ) {
     child.context = parent.context.clone();
+    // CR 608.2c + CR 109.4: Carry the resolution-scoped chosen-players list
+    // down the chain so `ControllerRef::ChosenPlayer { index }` and later
+    // `Choose(Player)` instructions resolve against players chosen by earlier
+    // `Choose(Player)` instructions in the same resolution. Only propagate
+    // when the parent has accumulated choices and the child has not already
+    // received a longer list (the `NamedChoice` answer handler appends to the
+    // continuation chain directly, which can run ahead of this copy).
+    if !parent.chosen_players.is_empty() && parent.chosen_players.len() > child.chosen_players.len()
+    {
+        child.set_chosen_players_recursive(&parent.chosen_players);
+    }
     if let Some(snapshot) = effect_context_object {
         child.set_effect_context_object_recursive(snapshot.clone());
     }
@@ -1335,6 +1346,19 @@ pub(crate) fn resolve_player_for_context_ref(
         return ability.scoped_player.unwrap_or(ability.controller);
     }
 
+    // CR 608.2c + CR 109.4: A player-only reference to the Nth chosen player
+    // ("choose a player to draw a card") resolves from the resolution-scoped
+    // chosen-players list. Falls back to `ability.controller` when the index
+    // is out of range (fewer eligible players were chosen — e.g. Gluntch's
+    // third choice skipped in a two-player game).
+    if let Some(index) = target_filter.chosen_player_index() {
+        return ability
+            .chosen_players
+            .get(index as usize)
+            .copied()
+            .unwrap_or(ability.controller);
+    }
+
     // CR 115.1: For non-context-ref filters (e.g. `TargetFilter::Player` from
     // "target player draws"), the drawing player was chosen at announcement
     // and lives in `ability.targets`. Context-ref filters (Controller,
@@ -1947,6 +1971,78 @@ pub fn resolve_ability_chain(
                 }
             }
             return Ok(());
+        }
+    }
+
+    // CR 608.2c + CR 608.2d + CR 109.4: Resolution-time target binding for a
+    // `ControllerRef::ChosenPlayer`-scoped effect ("They put two +1/+1
+    // counters on a creature they control"). The dependent effect's target
+    // filter could not be resolved when the ability went on the stack —
+    // `collect_target_slots` deliberately surfaced no slot for it because the
+    // chosen player was unknown. Now, mid-resolution, the preceding
+    // `Effect::Choose` has populated `chosen_players`, so the filter resolves
+    // against the matching objects the chosen player controls:
+    //   * 0 candidates  → the effect does nothing (CR 608.2c); fall through so
+    //     the sub_ability chain (the next `Choose`) still resolves.
+    //   * 1 candidate   → no choice exists; bind it directly.
+    //   * 2+ candidates → CR 608.2d: the *chosen player* (not the ability's
+    //     controller) chooses which object. Surface `ChooseFromZoneChoice`
+    //     scoped to the chosen player and stash the dependent effect (with its
+    //     `sub_ability` chain intact) as a continuation, mirroring the Bolster
+    //     keyword-action pattern (`game/effects/bolster.rs`). The
+    //     `ChooseFromZoneChoice` answer handler injects the picked object into
+    //     `cont.chain.targets`; `drain_pending_continuation` then resumes the
+    //     `PutCounter` and the trailing `Choose` clauses.
+    if ability.targets.is_empty() && !ability.chosen_players.is_empty() {
+        if let Some(filter) = ability.effect.target_filter() {
+            if let Some(index) = crate::game::ability_utils::filter_chosen_player_index(filter) {
+                if let Some(&chosen) = ability.chosen_players.get(index as usize) {
+                    // Rewrite `ChosenPlayer → You` and enumerate against the
+                    // chosen player so `find_legal_targets`' source-controller
+                    // plumbing yields objects that player controls.
+                    let enum_filter =
+                        crate::game::ability_utils::rewrite_chosen_player_to_you(filter);
+                    let mut legal = crate::game::targeting::find_legal_targets(
+                        state,
+                        &enum_filter,
+                        chosen,
+                        ability.source_id,
+                    );
+                    match legal.len() {
+                        0 => {}
+                        1 => {
+                            let mut bound = ability.clone();
+                            bound.targets = legal;
+                            return resolve_ability_chain(state, &bound, events, depth);
+                        }
+                        _ => {
+                            // CR 608.2d: the chosen player picks one object.
+                            let candidates: Vec<ObjectId> = legal
+                                .drain(..)
+                                .filter_map(|t| match t {
+                                    TargetRef::Object(id) => Some(id),
+                                    TargetRef::Player(_) => None,
+                                })
+                                .collect();
+                            if !candidates.is_empty() {
+                                let mut cont = ability.clone();
+                                cont.targets.clear();
+                                state.pending_continuation =
+                                    Some(PendingContinuation::new(Box::new(cont)));
+                                state.waiting_for = WaitingFor::ChooseFromZoneChoice {
+                                    player: chosen,
+                                    cards: candidates,
+                                    count: 1,
+                                    up_to: false,
+                                    constraint: None,
+                                    source_id: ability.source_id,
+                                };
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 

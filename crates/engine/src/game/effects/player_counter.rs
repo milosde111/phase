@@ -217,6 +217,7 @@ mod tests {
             unless_pay: None,
             distribution: None,
             target_selection_mode: crate::types::ability::TargetSelectionMode::Chosen,
+            chosen_players: Vec::new(),
         }
     }
 
@@ -354,6 +355,7 @@ mod tests {
             unless_pay: None,
             distribution: None,
             target_selection_mode: crate::types::ability::TargetSelectionMode::Chosen,
+            chosen_players: Vec::new(),
         }
     }
 

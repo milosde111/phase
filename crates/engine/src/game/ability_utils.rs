@@ -923,7 +923,9 @@ fn collect_target_slots(
                 optional: ability.optional_targeting,
             });
         }
-        if ability.target_choice_timing == TargetChoiceTiming::Stack {
+        if ability.target_choice_timing == TargetChoiceTiming::Stack
+            && !effect_target_filter_references_chosen_player(&ability.effect)
+        {
             if let Some(filter) = triggers::extract_target_filter_from_effect(&ability.effect) {
                 let legal_targets = legal_choices_for_ability_filter(state, ability, filter, slots);
                 // CR 601.2c: An "up to N" ability (`multi_target.min == 0`) — or an
@@ -1097,6 +1099,78 @@ fn effect_references_target_player(effect: &Effect) -> bool {
             matches!(target, TargetFilter::Player) || filter_references_target_player(target)
         }
         _ => false,
+    }
+}
+
+/// CR 608.2c + CR 109.4: Tree-walks a `TargetFilter` and returns true if any
+/// `TypedFilter` inside it is scoped to `ControllerRef::ChosenPlayer`. Such a
+/// filter resolves against a player chosen *during* resolution (an earlier
+/// `Effect::Choose`), so it must NOT surface a stack-push target slot — the
+/// chosen player (and therefore the legal-target set) is not known when the
+/// ability goes on the stack. The dependent effect selects its target during
+/// resolution instead.
+fn filter_references_chosen_player(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(TypedFilter { controller, .. }) => {
+            matches!(controller, Some(ControllerRef::ChosenPlayer { .. }))
+        }
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(filter_references_chosen_player)
+        }
+        TargetFilter::Not { filter } => filter_references_chosen_player(filter),
+        _ => false,
+    }
+}
+
+/// True when the effect's primary target filter is scoped to a resolution-time
+/// chosen player — see `filter_references_chosen_player`.
+fn effect_target_filter_references_chosen_player(effect: &Effect) -> bool {
+    effect
+        .target_filter()
+        .is_some_and(filter_references_chosen_player)
+}
+
+/// CR 608.2c + CR 109.4: First `ControllerRef::ChosenPlayer` index found in
+/// the filter tree, if any. Used at resolution time to bind the chosen player
+/// before enumerating the dependent effect's legal targets.
+pub(crate) fn filter_chosen_player_index(filter: &TargetFilter) -> Option<u8> {
+    match filter {
+        TargetFilter::Typed(TypedFilter {
+            controller: Some(ControllerRef::ChosenPlayer { index }),
+            ..
+        }) => Some(*index),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().find_map(filter_chosen_player_index)
+        }
+        TargetFilter::Not { filter } => filter_chosen_player_index(filter),
+        _ => None,
+    }
+}
+
+/// CR 109.4: Rewrite every `ControllerRef::ChosenPlayer` in the filter tree to
+/// `ControllerRef::You` so `find_legal_targets`' source-controller plumbing
+/// can enumerate the chosen player's objects by passing that player as the
+/// `controller` argument. Mirrors the `TargetPlayer → You` rewrite at
+/// `legal_targets_for_ability_filter`.
+pub(crate) fn rewrite_chosen_player_to_you(filter: &TargetFilter) -> TargetFilter {
+    match filter {
+        TargetFilter::Typed(tf)
+            if matches!(tf.controller, Some(ControllerRef::ChosenPlayer { .. })) =>
+        {
+            let mut rewritten = tf.clone();
+            rewritten.controller = Some(ControllerRef::You);
+            TargetFilter::Typed(rewritten)
+        }
+        TargetFilter::And { filters } => TargetFilter::And {
+            filters: filters.iter().map(rewrite_chosen_player_to_you).collect(),
+        },
+        TargetFilter::Or { filters } => TargetFilter::Or {
+            filters: filters.iter().map(rewrite_chosen_player_to_you).collect(),
+        },
+        TargetFilter::Not { filter } => TargetFilter::Not {
+            filter: Box::new(rewrite_chosen_player_to_you(filter)),
+        },
+        other => other.clone(),
     }
 }
 

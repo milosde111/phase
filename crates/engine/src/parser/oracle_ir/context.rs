@@ -36,6 +36,14 @@ pub(crate) struct ParseContext {
     /// CR 109.4 + CR 115.1: Relative-player scope for "that player controls"
     /// resolution inside trigger effects. Replaces thread-local oracle_target_scope.
     pub relative_player_scope: Option<ControllerRef>,
+    /// CR 608.2c + CR 109.4: Count of `Effect::Choose { choice_type: Player }`
+    /// clauses emitted so far in the current effect chain. Each "choose a
+    /// player" / "choose a [second|third] player" clause increments this; the
+    /// 0-based index of the *next* chosen player is the current value. Used to
+    /// stamp `ControllerRef::ChosenPlayer { index }` so a dependent effect
+    /// ("they put counters on a creature they control") binds to the player
+    /// chosen by the immediately-preceding `Choose(Player)`.
+    pub chosen_player_count: u8,
     /// CR 115.1 + CR 701.9b: Target selection mode for the most recent target
     /// phrase parsed via `parse_target_with_ctx`. The chunk loop in
     /// `parse_effect_chain_ir` snapshots this into the produced `ClauseIr` and

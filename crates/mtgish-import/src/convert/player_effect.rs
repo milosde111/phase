@@ -271,6 +271,12 @@ fn controller_to_scope(c: &ControllerRef) -> ConvResult<ProhibitionScope> {
             engine_type: "ProhibitionScope",
             needed_variant: "DefendingPlayer".into(),
         }),
+        // CR 608.2c: A resolution-time chosen player has no static
+        // `ProhibitionScope` meaning — strict-fail.
+        ControllerRef::ChosenPlayer { .. } => Err(ConversionGap::EnginePrerequisiteMissing {
+            engine_type: "ProhibitionScope",
+            needed_variant: "ChosenPlayer".into(),
+        }),
     }
 }
 

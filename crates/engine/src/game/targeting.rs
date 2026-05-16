@@ -93,6 +93,9 @@ pub fn find_legal_targets(
                     Some(ControllerRef::TargetPlayer) => false,
                     Some(ControllerRef::ParentTargetController) => false,
                     Some(ControllerRef::DefendingPlayer) => false,
+                    // CR 109.4: A chosen player is fixed during resolution, not
+                    // enumerated as a target candidate. Fail closed.
+                    Some(ControllerRef::ChosenPlayer { .. }) => false,
                     None => true,
                 };
                 if include {
@@ -525,6 +528,12 @@ pub fn resolve_effect_player_ref(
                     }
                 })
             })
+        }
+        // CR 608.2c + CR 109.4: A player-only reference to the Nth chosen
+        // player resolves from the resolution-scoped `chosen_players` list.
+        TargetFilter::Typed(_) if filter.chosen_player_index().is_some() => {
+            let index = filter.chosen_player_index().expect("checked by guard");
+            ability.chosen_players.get(index as usize).copied()
         }
         _ => resolve_event_context_target(state, filter, ability.source_id).and_then(|target| {
             match target {

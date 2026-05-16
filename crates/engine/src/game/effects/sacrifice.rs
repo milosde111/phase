@@ -66,6 +66,14 @@ fn resolve_sacrifice_scope(
                 .map(|pid| vec![pid])
                 .unwrap_or_default()
         }
+        // CR 608.2c + CR 109.4: Player chosen by an earlier `Choose(Player)`
+        // in this resolution.
+        Some(ControllerRef::ChosenPlayer { index }) => ability
+            .chosen_players
+            .get(index as usize)
+            .copied()
+            .map(|pid| vec![pid])
+            .unwrap_or_default(),
     }
 }
 

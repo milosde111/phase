@@ -144,6 +144,11 @@ fn collect_player_targets(
                 Some(ControllerRef::TargetPlayer) => false,
                 Some(ControllerRef::ParentTargetController) => false,
                 Some(ControllerRef::DefendingPlayer) => false,
+                // CR 608.2c + CR 109.4: Player chosen by an earlier
+                // `Choose(Player)` in this resolution.
+                Some(ControllerRef::ChosenPlayer { index }) => {
+                    ability.chosen_players.get(*index as usize).copied() == Some(p.id)
+                }
                 None => true,
             })
             .map(|p| p.id)

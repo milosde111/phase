@@ -2080,6 +2080,9 @@ fn evaluate_replacement_condition(
                 Some(ControllerRef::TargetPlayer) => false,
                 Some(ControllerRef::ParentTargetController) => false,
                 Some(ControllerRef::DefendingPlayer) => false,
+                // CR 109.4: Chosen-player scope is undefined at replacement-check
+                // time (no resolution context). Fail closed.
+                Some(ControllerRef::ChosenPlayer { .. }) => false,
                 None => true,
             };
             if !turn_ok {
@@ -2106,6 +2109,9 @@ fn evaluate_replacement_condition(
                 Some(ControllerRef::TargetPlayer) => false,
                 Some(ControllerRef::ParentTargetController) => false,
                 Some(ControllerRef::DefendingPlayer) => false,
+                // CR 109.4: Chosen-player scope is undefined at replacement-check
+                // time (no resolution context). Fail closed.
+                Some(ControllerRef::ChosenPlayer { .. }) => false,
                 None => true,
             };
             if !turn_ok {
@@ -2216,7 +2222,8 @@ fn evaluate_replacement_condition(
                 ControllerRef::ScopedPlayer
                 | ControllerRef::TargetPlayer
                 | ControllerRef::ParentTargetController
-                | ControllerRef::DefendingPlayer => false,
+                | ControllerRef::DefendingPlayer
+                | ControllerRef::ChosenPlayer { .. } => false,
             }
         }
         // CR 500.7 + CR 614.10: Replacement applies only for extra turns.
@@ -2452,6 +2459,9 @@ pub fn find_applicable_replacements(
                                     false
                                 }
                                 crate::types::ability::ControllerRef::DefendingPlayer => false,
+                                // CR 109.4: Chosen-player scope has no meaning
+                                // for static token-creation replacements.
+                                crate::types::ability::ControllerRef::ChosenPlayer { .. } => false,
                             };
                             if !matches {
                                 continue;
@@ -2481,6 +2491,11 @@ pub fn find_applicable_replacements(
                                 false
                             }
                             Some(crate::types::ability::ControllerRef::DefendingPlayer) => false,
+                            // CR 109.4: Chosen-player scope has no meaning at
+                            // replacement-application time.
+                            Some(crate::types::ability::ControllerRef::ChosenPlayer { .. }) => {
+                                false
+                            }
                             None => {
                                 // Default: controller-only (backward compatible)
                                 *player_id == obj.controller

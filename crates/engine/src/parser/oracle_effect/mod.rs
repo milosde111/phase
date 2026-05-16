@@ -2392,6 +2392,136 @@ fn is_copy_token_anaphor_body(input: &str) -> bool {
     parsed(input).is_ok()
 }
 
+/// CR 608.2c + CR 109.4: "Choose a [second|third|...] player to <verb>" —
+/// decompose into a `Choose(Player)` whose chosen player performs the verb.
+///
+/// The clause is recognized with nom combinators: `tag("choose a ")` →
+/// optional ordinal (`parse_ordinal`) → `tag("player")` → optional
+/// `preceded(" to ", <verb phrase>)`. The verb phrase, when present, is parsed
+/// by the standard `parse_effect_clause` pipeline and attached as the
+/// `Choose`'s `sub_ability`; its player-recipient field is rebound to
+/// `ControllerRef::ChosenPlayer { index }` so the chosen player — not the
+/// ability's controller — performs the effect.
+///
+/// `ctx.chosen_player_count` supplies the 0-based chain index (1st choose = 0)
+/// and is incremented here; `ctx.relative_player_scope` is set to the new
+/// `ChosenPlayer` so a *following* sentence ("They put counters on a creature
+/// they control") binds its "they"/"that player" anaphora to this choice.
+///
+/// The ordinal word ("second"/"third") is a parse-time consistency hint only —
+/// the engine index is derived from chain position, not the ordinal.
+fn try_parse_choose_player_to_verb(
+    tp: TextPair<'_>,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
+    // `choose a ` prefix — nom `tag()` dispatch on the already-lowercase
+    // `tp.lower` (no `nom_on_lower` bridge needed: the slice is lowercase).
+    let (after_choose, _) = tag::<_, _, OracleError<'_>>("choose a ")
+        .parse(tp.lower)
+        .ok()?;
+    // Optional ordinal — "second"/"third"/etc. Consumed but not semantically
+    // carried (the index comes from `chosen_player_count`).
+    let after_ordinal = super::oracle_util::parse_ordinal(after_choose)
+        .map(|(_, rest)| rest)
+        .unwrap_or(after_choose);
+    // `player` head noun, then either end-of-clause or a " to <verb>" tail.
+    let after_player = tag::<_, _, OracleError<'_>>("player")
+        .parse(after_ordinal)
+        .ok()?
+        .0;
+
+    // The chain index is the count of `Choose(Player)` clauses already
+    // finalized in this chain. The chunk loop owns the increment (once per
+    // finalized clause) — this function only READS the count and is
+    // side-effect-free on it, because the loop speculatively double-parses
+    // each chunk (`parse_effect_clause` at the trial site + the real site).
+    let index = ctx.chosen_player_count;
+    let chosen_scope = ControllerRef::ChosenPlayer { index };
+
+    // Optional verb continuation: " to <verb phrase>" — nom `tag()` dispatch
+    // on the lowercase remainder.
+    let verb_lower = tag::<_, _, OracleError<'_>>(" to ")
+        .parse(after_player)
+        .ok()
+        .map(|(rest, _)| rest.trim_start());
+
+    // Bind the relative-player scope so a later "they"/"that player controls"
+    // sentence — and this clause's own verb sub-effect — resolve to this
+    // chosen player. Idempotent under the loop's double-parse (set to the
+    // same value each time).
+    ctx.relative_player_scope = Some(chosen_scope.clone());
+
+    let mut clause = parsed_clause(Effect::Choose {
+        choice_type: ChoiceType::Player,
+        persist: false,
+    });
+
+    if let Some(verb_lower) = verb_lower {
+        if verb_lower.is_empty() {
+            return Some(clause);
+        }
+        // Map the lowercase verb tail back to the original-case slice so the
+        // recursive parse sees unmodified text.
+        let verb_orig = &tp.original[tp.original.len() - verb_lower.len()..];
+        let mut verb_clause = parse_effect_clause(verb_orig, ctx);
+        if matches!(verb_clause.effect, Effect::Unimplemented { .. }) {
+            // The verb tail didn't parse — fall back to the bare Choose so the
+            // chosen player is still recorded (no dependent effect).
+            return Some(clause);
+        }
+        // CR 109.4: The verb's actor/recipient is the chosen player, not the
+        // ability controller. Rebind the player-recipient field.
+        retarget_effect_to_chosen_player(&mut verb_clause.effect, index);
+        let mut sub = AbilityDefinition::new(AbilityKind::Spell, verb_clause.effect);
+        sub.sub_ability = verb_clause.sub_ability;
+        sub.duration = verb_clause.duration;
+        clause.sub_ability = Some(Box::new(sub));
+    }
+
+    Some(clause)
+}
+
+/// CR 109.4: Rebind a verb effect's player-recipient field to the Nth chosen
+/// player. Covers the player-recipient effect families that follow a "choose a
+/// player to <verb>" clause and carry a `Controller`-defaulted recipient
+/// `TargetFilter` (`Draw`, `Token` owner, `Mill`, `Scry`, `Surveil`,
+/// `LoseLife`). The recipient is encoded as a player-only `TargetFilter::Typed`
+/// carrying `ControllerRef::ChosenPlayer { index }`, which
+/// `resolve_player_for_context_ref` / `resolve_effect_player_ref` resolve at
+/// resolution time. Effects without a `Controller`-defaulted recipient
+/// `TargetFilter` are left untouched — the surrounding `relative_player_scope`
+/// already binds object-controller anaphora ("a creature they control").
+///
+/// `GainLife` (recipient is the `GainLifePlayer` enum, not a `TargetFilter`)
+/// and `Discard`/`DiscardCard` (no player-recipient `TargetFilter` — `Discard`
+/// is self-scoped, `DiscardCard.filter` selects *what* is discarded, not
+/// *who*) are a deliberate class-boundary deferral: no current card pairs
+/// "choose a player to <verb>" with those verbs. Extending to them is a
+/// follow-up if such a card prints — it is not a bug in this helper.
+fn retarget_effect_to_chosen_player(effect: &mut Effect, index: u8) {
+    let chosen = TargetFilter::Typed(crate::types::ability::TypedFilter {
+        controller: Some(ControllerRef::ChosenPlayer { index }),
+        ..Default::default()
+    });
+    let rebind = |slot: &mut TargetFilter| {
+        if matches!(slot, TargetFilter::Controller | TargetFilter::Player) {
+            *slot = chosen.clone();
+        }
+    };
+    match effect {
+        Effect::Draw { target, .. } => rebind(target),
+        Effect::Token { owner, .. } => rebind(owner),
+        Effect::Mill { target, .. } => rebind(target),
+        Effect::Scry { target, .. } => rebind(target),
+        Effect::Surveil { target, .. } => rebind(target),
+        Effect::LoseLife {
+            target: Some(target),
+            ..
+        } => rebind(target),
+        _ => {}
+    }
+}
+
 #[tracing::instrument(level = "debug")]
 fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffectClause {
     let text = strip_leading_sequence_connector(text)
@@ -2484,6 +2614,18 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     }
 
     if let Some(clause) = try_parse_for_each_copy_token_source(text, &lower, ctx) {
+        return clause;
+    }
+
+    // CR 608.2c + CR 109.4: "Choose a [second|third|...] player to <verb>" —
+    // a `Choose(Player)` whose chosen player then performs the trailing verb
+    // phrase (Gluntch, the Bestower; the Tempt cycle). Decomposed into an
+    // `Effect::Choose { choice_type: Player }` with the verb phrase as a
+    // `sub_ability`; the sub's player-relative references resolve to the
+    // chosen player via `ctx.relative_player_scope`. Checked before the
+    // generic imperative `choose` dispatch (which would consume the prefix
+    // and drop the trailing verb).
+    if let Some(clause) = try_parse_choose_player_to_verb(tp, ctx) {
         return clause;
     }
 
@@ -9306,6 +9448,15 @@ pub(crate) fn parse_effect_chain_ir(
     // sentence before the body clause. The count is stashed here and applied
     // to the immediately-following clause so the body executes N times.
     let mut pending_repeat_for: Option<QuantityExpr> = None;
+    // CR 608.2c + CR 109.4: Chain-spanning chosen-player state. The per-chunk
+    // `chunk_ctx` is rebuilt fresh each iteration, so these loop-locals thread
+    // the running `Choose(Player)` count and the active chosen-player scope
+    // from one sentence to the next: "choose a player. They put counters …
+    // choose a second player to draw" — the `ChosenPlayer { index }` index and
+    // the "they"/"that player controls" anaphor scope both depend on choices
+    // made in earlier chunks. Seeded into each `chunk_ctx` and read back after.
+    let mut chain_chosen_player_count: u8 = 0;
+    let mut chain_chosen_player_scope: Option<ControllerRef> = None;
 
     for (chunk_idx, chunk) in chunks.iter().enumerate() {
         let normalized_text = strip_leading_sequence_connector(&chunk.text).trim();
@@ -10022,10 +10173,18 @@ pub(crate) fn parse_effect_chain_ir(
             // CR 109.4 + CR 115.1 + CR 506.2: propagate relative-player scope
             // from the trigger condition so "that player controls" inside any
             // chunk resolves to TargetPlayer rather than defaulting to You.
-            relative_player_scope: ctx
-                .relative_player_scope
-                .clone()
-                .or_else(|| player_scope.map(|_| ControllerRef::ScopedPlayer)),
+            // CR 608.2c: a chosen-player scope set by an earlier "choose a
+            // player" sentence (Gluntch) takes precedence — the "they"/"that
+            // player controls" anaphor binds to the most recent choice.
+            relative_player_scope: chain_chosen_player_scope.clone().or_else(|| {
+                ctx.relative_player_scope
+                    .clone()
+                    .or_else(|| player_scope.map(|_| ControllerRef::ScopedPlayer))
+            }),
+            // CR 608.2c + CR 109.4: chain-spanning count of `Choose(Player)`
+            // clauses already finalized — supplies the next `ChosenPlayer`
+            // index.
+            chosen_player_count: chain_chosen_player_count,
             // CR 303.4 + CR 702.103: propagate the enclosing card's typed host
             // self-reference so a `"that creature"` copy-token anaphor in any
             // chunk of an Aura/bestow card remaps to the enchanted host.
@@ -10186,6 +10345,22 @@ pub(crate) fn parse_effect_chain_ir(
         } else {
             (parse_effect_clause(&text_no_qty, ctx), repeat_for)
         };
+
+        // CR 608.2c + CR 109.4: After a `Choose(Player)` clause is finalized,
+        // advance the chain's chosen-player counter exactly once. The index is
+        // read (not mutated) inside `try_parse_choose_player_to_verb`, which is
+        // called speculatively (the trial parse above + the real parse). Doing
+        // the increment here — once per finalized chunk — keeps the next
+        // `ChosenPlayer { index }` correct under that double-parse.
+        if matches!(
+            clause.effect,
+            Effect::Choose {
+                choice_type: ChoiceType::Player,
+                ..
+            }
+        ) {
+            ctx.chosen_player_count = ctx.chosen_player_count.saturating_add(1);
+        }
 
         // CR 118.12: After parsing the effect clause, the lowering for
         // `Effect::Counter` carries its own `unless_pay` modifier on the
@@ -10682,6 +10857,16 @@ pub(crate) fn parse_effect_chain_ir(
         // Drain chunk-ctx diagnostics into the accumulator (the outer `ctx` is
         // shadowed inside the loop, so we collect here and extend after the loop).
         chunk_diagnostics.append(&mut chunk_ctx.diagnostics);
+
+        // CR 608.2c + CR 109.4: Carry the chosen-player state forward to the
+        // next chunk. The per-chunk loop body advanced `chosen_player_count`
+        // (once per finalized `Choose(Player)` clause) and set
+        // `relative_player_scope` to the chosen scope; thread both into the
+        // chain-spanning loop-locals so the following sentence sees them.
+        chain_chosen_player_count = chunk_ctx.chosen_player_count;
+        if let Some(scope @ ControllerRef::ChosenPlayer { .. }) = &chunk_ctx.relative_player_scope {
+            chain_chosen_player_scope = Some(scope.clone());
+        }
     }
 
     // Merge per-chunk diagnostics and any pre-loop diagnostics into the outer ctx.
@@ -30688,6 +30873,98 @@ mod snapshot_tests {
             replacement.expiry,
             Some(RestrictionExpiry::EndOfTurn),
             "Crafty Cutpurse's redirect is bounded to 'this turn' — must expire at EOT"
+        );
+    }
+
+    /// CR 608.2c + CR 109.4 (issue #409): Gluntch, the Bestower's end-step
+    /// "choose a player … choose a second player to … choose a third player
+    /// to …" chain decomposes into three `Choose(Player)` nodes. The dependent
+    /// effects bind to the chosen player via `ControllerRef::ChosenPlayer`, and
+    /// the 2nd/3rd choose clauses no longer fall back to `Unimplemented`.
+    #[test]
+    fn gluntch_choose_player_chain_parses_with_chosen_player_scopes() {
+        let def = parse_effect_chain(
+            "choose a player. They put two +1/+1 counters on a creature they \
+             control. Choose a second player to draw a card. Then choose a \
+             third player to create two Treasure tokens.",
+            AbilityKind::Spell,
+        );
+
+        // Node 0: the first `Choose(Player)`.
+        assert!(
+            matches!(
+                def.effect.as_ref(),
+                Effect::Choose {
+                    choice_type: ChoiceType::Player,
+                    ..
+                }
+            ),
+            "first node must be Choose(Player), got {:?}",
+            def.effect
+        );
+
+        // Node 1: PutCounter on a creature controlled by the 1st chosen player.
+        let node1 = def.sub_ability.as_ref().expect("PutCounter node");
+        let Effect::PutCounter { target, .. } = node1.effect.as_ref() else {
+            panic!("node 1 must be PutCounter, got {:?}", node1.effect);
+        };
+        let TargetFilter::Typed(tf) = target else {
+            panic!("PutCounter target must be Typed, got {target:?}");
+        };
+        assert_eq!(
+            tf.controller,
+            Some(ControllerRef::ChosenPlayer { index: 0 }),
+            "the +1/+1 counters go on a creature the 1st chosen player controls"
+        );
+
+        // Node 2: the second `Choose(Player)`.
+        let node2 = node1.sub_ability.as_ref().expect("2nd Choose node");
+        assert!(
+            matches!(
+                node2.effect.as_ref(),
+                Effect::Choose {
+                    choice_type: ChoiceType::Player,
+                    ..
+                }
+            ),
+            "node 2 must be Choose(Player) — not Unimplemented — got {:?}",
+            node2.effect
+        );
+
+        // Node 3: Draw by the 2nd chosen player.
+        let node3 = node2.sub_ability.as_ref().expect("Draw node");
+        let Effect::Draw { target, .. } = node3.effect.as_ref() else {
+            panic!("node 3 must be Draw, got {:?}", node3.effect);
+        };
+        assert_eq!(
+            target.chosen_player_index(),
+            Some(1),
+            "the 2nd chosen player draws the card"
+        );
+
+        // Node 4: the third `Choose(Player)`.
+        let node4 = node3.sub_ability.as_ref().expect("3rd Choose node");
+        assert!(
+            matches!(
+                node4.effect.as_ref(),
+                Effect::Choose {
+                    choice_type: ChoiceType::Player,
+                    ..
+                }
+            ),
+            "node 4 must be Choose(Player) — not Unimplemented — got {:?}",
+            node4.effect
+        );
+
+        // Node 5: Treasure tokens owned by the 3rd chosen player.
+        let node5 = node4.sub_ability.as_ref().expect("Token node");
+        let Effect::Token { owner, .. } = node5.effect.as_ref() else {
+            panic!("node 5 must be Token, got {:?}", node5.effect);
+        };
+        assert_eq!(
+            owner.chosen_player_index(),
+            Some(2),
+            "the 3rd chosen player creates (owns) the Treasure tokens"
         );
     }
 }
