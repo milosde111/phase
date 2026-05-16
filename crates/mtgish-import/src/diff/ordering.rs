@@ -312,6 +312,13 @@ pub const ORDERING_MANIFEST: &[((&str, &str), OrderingClass)] = &[
         ("ResolvedAbility", "targets"),
         OrderingClass::OrderSignificant,
     ),
+    // CR 608.2c: players chosen mid-resolution, in chain order.
+    // `ControllerRef::ChosenPlayer { index }` reads this list positionally,
+    // so reordering re-binds which player a given index resolves to.
+    (
+        ("ResolvedAbility", "chosen_players"),
+        OrderingClass::OrderSignificant,
+    ),
     (
         ("SpellContext", "kickers_paid"),
         OrderingClass::SetEquivalent,
