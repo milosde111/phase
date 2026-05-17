@@ -1913,6 +1913,8 @@ fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Trigger
 
         // CR 725.1: Monarch status bridges directly.
         StaticCondition::IsMonarch => Some(TriggerCondition::IsMonarch),
+        // CR 725.1: "there is no monarch" bridges directly.
+        StaticCondition::NoMonarch => Some(TriggerCondition::NoMonarch),
         // CR 702.131a: City's Blessing bridges directly.
         StaticCondition::HasCityBlessing => Some(TriggerCondition::HasCityBlessing),
         // CR 110.5b: Source tapped state bridges for trigger conditions like
@@ -14942,6 +14944,14 @@ mod tests {
         assert_eq!(
             static_condition_to_trigger_condition(&StaticCondition::IsMonarch),
             Some(TriggerCondition::IsMonarch),
+        );
+    }
+
+    #[test]
+    fn bridge_no_monarch() {
+        assert_eq!(
+            static_condition_to_trigger_condition(&StaticCondition::NoMonarch),
+            Some(TriggerCondition::NoMonarch),
         );
     }
 

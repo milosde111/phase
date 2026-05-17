@@ -3310,6 +3310,9 @@ pub enum StaticCondition {
     SourceIsBlocked,
     /// CR 725.1: True when the controller is the monarch.
     IsMonarch,
+    /// CR 725.1: True when no player holds the monarch designation. Distinct
+    /// from `Not(IsMonarch)`, which is also true when an opponent is monarch.
+    NoMonarch,
     /// CR 702.131a: True when the controller has the city's blessing (Ascend).
     HasCityBlessing,
     /// CR 309.7: True when the controller has completed at least one dungeon.
@@ -3539,7 +3542,12 @@ pub enum ParsedCondition {
     YouControlNamedPlaneswalker {
         name: String,
     },
-    YouControlCreatureWithKeyword {
+    /// CR 602.5b: "[you / an opponent] control(s) a creature with [keyword]"
+    /// activation restriction. `controller` selects whose creatures are
+    /// inspected — `ControllerRef::You` for "you control", `Opponent` for
+    /// "an opponent controls".
+    ControlsCreatureWithKeyword {
+        controller: ControllerRef,
         keyword: Keyword,
     },
     YouControlCreatureWithPowerAtLeast {
@@ -8150,6 +8158,9 @@ pub enum TriggerCondition {
 
     /// CR 725.1: "if you're the monarch" is true when the controller is the monarch.
     IsMonarch,
+    /// CR 725.1: "if there is no monarch" is true when no player holds the
+    /// monarch designation. Distinct from `Not(IsMonarch)`.
+    NoMonarch,
     /// CR 103.1: "if you were/weren't the starting player" — true when the
     /// scoped player took the first turn of the game
     /// (`GameState.current_starting_player`). Used by Radiant Smite's Cycling
@@ -8368,6 +8379,12 @@ pub enum ReplacementCondition {
     /// CR 702.138c: "escapes with" — replacement applies only when the creature
     /// entered the battlefield via escape.
     CastViaEscape,
+    /// CR 702.188a: "if ~ was cast using [variant]" — replacement applies only
+    /// when the source permanent's spell was cast paying the named alternative
+    /// cost. Mirrors `TriggerCondition::CastVariantPaid` /
+    /// `AbilityCondition::CastVariantPaid`. Evaluated against
+    /// `GameObject.cast_variant_paid`. Used by Scarlet Spider (web-slinging).
+    CastVariantPaid { variant: CastVariantPaid },
     /// CR 603.4: "if you cast it from [zone]" — replacement applies only when
     /// the source object was cast from the specified zone (e.g., Myojin's
     /// "enters with an indestructible counter on it if you cast it from your

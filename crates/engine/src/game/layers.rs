@@ -517,6 +517,8 @@ fn evaluate_condition_with_context(
         }),
         // CR 725.1: True when the controller is the monarch.
         StaticCondition::IsMonarch => state.monarch == Some(controller),
+        // CR 725.1: True when no player holds the monarch designation.
+        StaticCondition::NoMonarch => state.monarch.is_none(),
         // CR 702.131a: True when the controller has the city's blessing.
         StaticCondition::HasCityBlessing => state.city_blessing.contains(&controller),
         StaticCondition::OpponentPoisonAtLeast { count } => state

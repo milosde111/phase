@@ -2711,6 +2711,8 @@ pub(crate) fn check_trigger_condition(
         }
         // CR 725.1: True when the controller is the monarch.
         TriggerCondition::IsMonarch => state.monarch == Some(controller),
+        // CR 725.1: True when no player holds the monarch designation.
+        TriggerCondition::NoMonarch => state.monarch.is_none(),
         // CR 702.131a: True when the controller has the city's blessing.
         TriggerCondition::HasCityBlessing => state.city_blessing.contains(&controller),
         // CR 110.5b: True when the trigger source is tapped. Negation ("untapped")
@@ -6892,6 +6894,44 @@ pub mod tests {
         ));
 
         // No trigger event → false
+        assert!(!check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(0),
+            Some(source),
+            None,
+        ));
+    }
+
+    #[test]
+    fn test_no_monarch_trigger_condition() {
+        // CR 725.1: NoMonarch is true only when no player holds the monarch.
+        let mut state = setup();
+        let source = ObjectId(10);
+        let condition = TriggerCondition::NoMonarch;
+
+        // No monarch → condition true.
+        state.monarch = None;
+        assert!(check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(0),
+            Some(source),
+            None,
+        ));
+
+        // Controller is monarch → false (distinct from Not(IsMonarch)).
+        state.monarch = Some(PlayerId(0));
+        assert!(!check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(0),
+            Some(source),
+            None,
+        ));
+
+        // An opponent is monarch → still false: a monarch exists.
+        state.monarch = Some(PlayerId(1));
         assert!(!check_trigger_condition(
             &state,
             &condition,

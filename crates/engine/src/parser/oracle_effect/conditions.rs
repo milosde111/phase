@@ -1938,6 +1938,9 @@ pub(crate) fn static_condition_to_ability_condition(
         // CR 702.166a: Bargain payment is a cost-determination predicate with no
         // effect-resolution (`AbilityCondition`) equivalent.
         | StaticCondition::AdditionalCostPaid
+        // CR 725.1: "there is no monarch" is a trigger-only intervening-if; no
+        // `AbilityCondition` monarch variant beyond `IsMonarch` exists.
+        | StaticCondition::NoMonarch
         | StaticCondition::None => None,
     }
 }

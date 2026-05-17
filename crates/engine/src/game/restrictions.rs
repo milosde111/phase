@@ -968,9 +968,14 @@ pub(crate) fn evaluate_condition(
                     && obj.name.contains(name.as_str())
             }) >= 1
         }
-        ParsedCondition::YouControlCreatureWithKeyword { keyword } => {
-            you_control_creature_with_keyword(state, player, keyword)
-        }
+        // CR 602.5b: honor the parameterized controller scope.
+        ParsedCondition::ControlsCreatureWithKeyword {
+            controller,
+            keyword,
+        } => match controller {
+            ControllerRef::You => you_control_creature_with_keyword(state, player, keyword),
+            _ => opponent_controls_creature_with_keyword(state, player, keyword),
+        },
         ParsedCondition::YouControlCreatureWithPowerAtLeast { minimum } => {
             controlled_objects_matching_count(state, player, |obj| {
                 obj.card_types.core_types.contains(&CoreType::Creature)
@@ -1310,6 +1315,17 @@ fn you_control_creature_with_keyword(
     }) >= 1
 }
 
+/// CR 602.5b: True when any opponent of `player` controls a creature with `keyword`.
+fn opponent_controls_creature_with_keyword(
+    state: &crate::types::game_state::GameState,
+    player: PlayerId,
+    keyword: &Keyword,
+) -> bool {
+    crate::game::players::opponents(state, player)
+        .into_iter()
+        .any(|opponent| you_control_creature_with_keyword(state, opponent, keyword))
+}
+
 fn you_control_land_with_any_subtype(
     state: &crate::types::game_state::GameState,
     player: PlayerId,
@@ -1623,6 +1639,56 @@ mod tests {
             PlayerId(0),
             bird,
             "you control a creature with flying"
+        ));
+    }
+
+    #[test]
+    fn evaluates_opponent_controls_creature_with_flying_condition() {
+        // CR 602.5b: Groundling Pouncer — "an opponent controls a creature with flying".
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+
+        // No flyers anywhere → condition false.
+        assert!(!parse_and_evaluate_condition(
+            &state,
+            PlayerId(0),
+            ObjectId(1),
+            "an opponent controls a creature with flying"
+        ));
+
+        // YOU control a flyer → still false (the controller scope is honored).
+        let your_bird = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Your Bird".to_string(),
+            Zone::Battlefield,
+        );
+        let your_bird_obj = state.objects.get_mut(&your_bird).unwrap();
+        your_bird_obj.card_types.core_types.push(CoreType::Creature);
+        your_bird_obj.keywords.push(Keyword::Flying);
+        assert!(!parse_and_evaluate_condition(
+            &state,
+            PlayerId(0),
+            your_bird,
+            "an opponent controls a creature with flying"
+        ));
+
+        // An OPPONENT controls a flyer → condition true.
+        let opp_bird = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opponent Bird".to_string(),
+            Zone::Battlefield,
+        );
+        let opp_bird_obj = state.objects.get_mut(&opp_bird).unwrap();
+        opp_bird_obj.card_types.core_types.push(CoreType::Creature);
+        opp_bird_obj.keywords.push(Keyword::Flying);
+        assert!(parse_and_evaluate_condition(
+            &state,
+            PlayerId(0),
+            your_bird,
+            "an opponent controls a creature with flying"
         ));
     }
 
