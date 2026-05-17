@@ -4612,7 +4612,7 @@ mod undying_persist_runtime_tests {
         synthesize_all(&mut face);
         let (mut state, obj_id) = setup_with_creature(&face, PlayerId(0));
 
-        // CR 613.1b + CR 613.10: install a REAL Threaten / Act-of-Treason-style
+        // CR 613.1b: install a REAL Threaten / Act-of-Treason-style
         // Layer-2 control-changing continuous effect so player 1 genuinely
         // controls the creature via the continuous-effect system — not a raw
         // `obj.controller =` mutation. The precondition is then derived
