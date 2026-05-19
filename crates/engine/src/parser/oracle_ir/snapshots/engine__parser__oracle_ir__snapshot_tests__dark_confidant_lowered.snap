@@ -43,7 +43,7 @@ expression: "&lowered"
                 "qty": {
                   "type": "ObjectManaValue",
                   "scope": {
-                    "type": "CostPaidObject"
+                    "type": "Anaphoric"
                   }
                 }
               },

@@ -7698,17 +7698,19 @@ fn rewrite_quantity_controller(expr: &mut QuantityExpr, from: ControllerRef, to:
     }
 }
 
-/// Recoerce a "its power" reference (parsed by default as
-/// `Power { scope: CostPaidObject }` per CR 608.2k) to a different
-/// `ObjectScope` when surrounding context establishes the binding — e.g. a
-/// damage clause whose subject is the source or first target object.
+/// Recoerce an anaphoric "its power" reference (parsed as
+/// `Power { scope: Anaphoric }` per CR 608.2k) to a concrete `ObjectScope`
+/// when surrounding context establishes the binding — e.g. a damage clause
+/// whose subject is the source or first target object. An explicit
+/// participle-possessive ("the sacrificed creature's power",
+/// `CostPaidObject` per CR 608.2k) is deliberately NOT matched here — its
+/// referent is fixed by the Oracle text and must not be clobbered.
 fn rewrite_event_source_power_to_object_power(expr: &mut QuantityExpr, scope: ObjectScope) {
     match expr {
         QuantityExpr::Ref {
-            qty:
-                QuantityRef::Power {
-                    scope: ObjectScope::CostPaidObject,
-                },
+            qty: QuantityRef::Power {
+                scope: ObjectScope::Anaphoric,
+            },
         } => {
             *expr = QuantityExpr::Ref {
                 qty: QuantityRef::Power { scope },
@@ -8015,8 +8017,11 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
             *target = Some(subject_filter);
         }
         // CR 608.2c + CR 120.3: When the stripped subject is the source object
-        // ("~ deals damage equal to its power..."), "its power" is the ability
-        // source's current power, not a triggering event's source power.
+        // ("~ deals damage equal to its power..."), an anaphoric "its power" is
+        // the ability source's current power, not a triggering event's source
+        // power. Only `ObjectScope::Anaphoric` is rewritten — an explicit
+        // possessive ("the sacrificed creature's power", `CostPaidObject` per
+        // CR 608.2k) keeps its parser-fixed referent and is left untouched.
         Effect::DealDamage { amount, .. } if subject_filter == TargetFilter::SelfRef => {
             rewrite_event_source_power_to_object_power(amount, ObjectScope::Source);
         }
@@ -13891,14 +13896,15 @@ fn try_parse_damage_with_remainder<'a>(
             if let Some(qty) = qty {
                 // Route based on target phrase
                 if target_phrase == "itself" {
-                    // When target is "itself", "its power" means the target's power,
-                    // not a cost-paid / trigger-referenced object's power. Remap the
-                    // CostPaidObject-scoped power ref to a Target ref.
+                    // CR 608.2k: When target is "itself", an anaphoric "its power"
+                    // means the target's power. Only `Anaphoric` is remapped — an
+                    // explicit possessive ("the sacrificed creature's power",
+                    // `CostPaidObject` per CR 608.2k) keeps its fixed referent.
                     let qty = match &qty {
                         QuantityExpr::Ref {
                             qty:
                                 QuantityRef::Power {
-                                    scope: crate::types::ability::ObjectScope::CostPaidObject,
+                                    scope: crate::types::ability::ObjectScope::Anaphoric,
                                 },
                         } => QuantityExpr::Ref {
                             qty: QuantityRef::Power {
@@ -16808,6 +16814,34 @@ mod tests {
             ),
             "expected target-source-power damage, got {:?}",
             sub.effect
+        );
+    }
+
+    /// Issue #495 — Rite of Consumption. The explicit participle-possessive
+    /// "the sacrificed creature's power" must resolve to the cost-paid object
+    /// (CR 608.2k), NOT the source. The subject-injection rewrite for a `~`
+    /// subject must leave an explicit possessive untouched — only the
+    /// anaphoric `ObjectScope::Anaphoric` is rewritten to `Source`.
+    #[test]
+    fn rite_of_consumption_possessive_power_stays_cost_paid_object() {
+        let clause = parse_effect_clause(
+            "~ deals damage equal to the sacrificed creature's power to target player or planeswalker",
+            &mut ParseContext::default(),
+        );
+        assert!(
+            matches!(
+                clause.effect,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Ref {
+                        qty: QuantityRef::Power {
+                            scope: ObjectScope::CostPaidObject
+                        },
+                    },
+                    ..
+                }
+            ),
+            "explicit possessive must keep CostPaidObject scope, got: {:?}",
+            clause.effect
         );
     }
 
@@ -21115,10 +21149,13 @@ mod tests {
         }
     }
 
-    /// CR 118.8 + CR 603.2: "pay life equal to its power" resolves against the
-    /// triggering event's source power (Madame Null, Power Broker). The outer
-    /// Effect here is just the PayCost — the "you may" optionality and
-    /// `IfYouDo` sub-ability are wired at the trigger layer.
+    /// CR 118.8 + CR 603.2 + CR 608.2k: "pay life equal to its power" — the bare
+    /// anaphoric "its power" parses to the parse-time marker `Anaphoric`. With no
+    /// surrounding clause subject to remap it, it survives to runtime, where it
+    /// resolves identically to `CostPaidObject` (the triggering event's source
+    /// power — Madame Null, Power Broker). The outer Effect here is just the
+    /// PayCost — the "you may" optionality and `IfYouDo` sub-ability are wired at
+    /// the trigger layer.
     #[test]
     fn effect_pay_life_equal_to_its_power() {
         let e = parse_effect("pay life equal to its power");
@@ -21129,7 +21166,7 @@ mod tests {
                     cost: PaymentCost::Life {
                         amount: crate::types::ability::QuantityExpr::Ref {
                             qty: crate::types::ability::QuantityRef::Power {
-                                scope: crate::types::ability::ObjectScope::CostPaidObject,
+                                scope: crate::types::ability::ObjectScope::Anaphoric,
                             },
                         },
                     },

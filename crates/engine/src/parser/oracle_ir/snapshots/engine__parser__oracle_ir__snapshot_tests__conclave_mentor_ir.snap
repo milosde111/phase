@@ -17,7 +17,7 @@ expression: "&ir"
               "qty": {
                 "type": "Power",
                 "scope": {
-                  "type": "CostPaidObject"
+                  "type": "Anaphoric"
                 }
               }
             },

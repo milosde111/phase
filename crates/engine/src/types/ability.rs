@@ -2410,6 +2410,20 @@ pub enum ObjectScope {
     /// trio (CR 117.1 + CR 400.7j cost referent and CR 603.2 trigger
     /// referent are the two enumerated members of CR 608.2k's single clause).
     CostPaidObject,
+    /// CR 608.2k: A deferred anaphoric pronoun ("it" / "its") whose object
+    /// referent is bound at parse time. The parser remaps this to a concrete
+    /// scope wherever it can — `Source` when the clause subject is the ability
+    /// source, `Target` when the recipient is "itself". For triggered abilities
+    /// no remap applies and `Anaphoric` survives to runtime, where it resolves
+    /// identically to `CostPaidObject` (behavior-preserving — these cards
+    /// parsed to `CostPaidObject` before this variant existed). General
+    /// rules-correct runtime resolution of triggered-ability anaphora (e.g.
+    /// "its mana value" after a reveal — see issue #511) is separate per-card
+    /// parser work. Distinguishing this from an explicit cost-paid possessive
+    /// ("the sacrificed creature's power", CR 608.2k -> `CostPaidObject`) is
+    /// what prevents the subject-injection rewrite from clobbering
+    /// correctly-scoped possessives.
+    Anaphoric,
 }
 
 /// Source set for counting distinct card types.

@@ -544,24 +544,29 @@ pub(crate) fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
                 qty: QuantityRef::EventContextAmount,
             });
         }
+        // CR 608.2k: bare anaphoric "its" — referent bound at parse time by the
+        // enclosing clause's subject/target. Emits `Anaphoric` so context
+        // remaps (subject-injection -> Source, "itself" -> Target) touch only
+        // the pronoun, never an explicit possessive ("the sacrificed
+        // creature's power" -> `CostPaidObject`, handled below).
         "its power" => {
             return Some(QuantityExpr::Ref {
                 qty: QuantityRef::Power {
-                    scope: ObjectScope::CostPaidObject,
+                    scope: ObjectScope::Anaphoric,
                 },
             })
         }
         "its toughness" => {
             return Some(QuantityExpr::Ref {
                 qty: QuantityRef::Toughness {
-                    scope: ObjectScope::CostPaidObject,
+                    scope: ObjectScope::Anaphoric,
                 },
             })
         }
         "its mana value" | "its converted mana cost" => {
             return Some(QuantityExpr::Ref {
                 qty: QuantityRef::ObjectManaValue {
-                    scope: ObjectScope::CostPaidObject,
+                    scope: ObjectScope::Anaphoric,
                 },
             })
         }
@@ -577,7 +582,11 @@ pub(crate) fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
         return Some(QuantityExpr::Ref { qty });
     }
 
-    // CR 603.7c: Decompose possessive noun phrases: "{referent}'s {property}"
+    // CR 603.7c: Decompose possessive noun phrases: "{referent}'s {property}".
+    // CR 608.2k: an explicit participle-possessive ("the sacrificed creature's
+    // power") yields `CostPaidObject` and is NEVER rewritten by the
+    // subject-injection / "itself" remaps — unlike the bare anaphoric "its"
+    // arms above, which emit `Anaphoric` precisely so they can be remapped.
     if let Some((prefix, suffix)) = lower.split_once("'s ") {
         let suffix = suffix.trim();
         // CR 608.2k: the trailing property word maps to the cost-paid /
@@ -1967,7 +1976,7 @@ mod tests {
             parse_event_context_quantity("its power"),
             Some(QuantityExpr::Ref {
                 qty: QuantityRef::Power {
-                    scope: ObjectScope::CostPaidObject
+                    scope: ObjectScope::Anaphoric
                 }
             })
         );
@@ -1979,7 +1988,7 @@ mod tests {
             parse_event_context_quantity("its toughness"),
             Some(QuantityExpr::Ref {
                 qty: QuantityRef::Toughness {
-                    scope: ObjectScope::CostPaidObject
+                    scope: ObjectScope::Anaphoric
                 }
             })
         );
@@ -1991,7 +2000,7 @@ mod tests {
             parse_event_context_quantity("its mana value"),
             Some(QuantityExpr::Ref {
                 qty: QuantityRef::ObjectManaValue {
-                    scope: ObjectScope::CostPaidObject
+                    scope: ObjectScope::Anaphoric
                 }
             })
         );

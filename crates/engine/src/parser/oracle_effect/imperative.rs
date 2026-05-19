@@ -7206,12 +7206,16 @@ mod tests {
         assert!(result.is_some(), "Should parse 'gain life equal to'");
         match result.unwrap() {
             NumericImperativeAst::GainLife { amount } => {
+                // CR 608.2k: bare anaphoric "its power" parses to the parse-time
+                // marker `Anaphoric`; the parser remaps it to a concrete scope
+                // where context allows, else it survives to runtime (resolving
+                // identically to `CostPaidObject`).
                 assert!(
                     matches!(
                         amount,
                         QuantityExpr::Ref {
                             qty: QuantityRef::Power {
-                                scope: crate::types::ability::ObjectScope::CostPaidObject
+                                scope: crate::types::ability::ObjectScope::Anaphoric
                             }
                         }
                     ),

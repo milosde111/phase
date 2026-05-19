@@ -17,7 +17,7 @@ expression: "&lowered"
             "qty": {
               "type": "Power",
               "scope": {
-                "type": "CostPaidObject"
+                "type": "Anaphoric"
               }
             }
           },

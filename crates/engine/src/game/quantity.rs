@@ -1941,7 +1941,10 @@ fn object_for_scope<'a>(
             .as_ref()
             .and_then(crate::game::targeting::extract_source_from_event)
             .and_then(|id| state.objects.get(&id)),
-        ObjectScope::CostPaidObject => None,
+        // CR 608.2k: a triggered-ability anaphoric pronoun that escaped parse-time
+        // remapping resolves identically to CostPaidObject — behavior-preserving
+        // (these cards parsed as CostPaidObject before ObjectScope::Anaphoric existed).
+        ObjectScope::CostPaidObject | ObjectScope::Anaphoric => None,
     }
 }
 
@@ -1970,7 +1973,10 @@ fn object_id_for_scope(
             .current_trigger_event
             .as_ref()
             .and_then(crate::game::targeting::extract_source_from_event),
-        ObjectScope::CostPaidObject => None,
+        // CR 608.2k: a triggered-ability anaphoric pronoun that escaped parse-time
+        // remapping resolves identically to CostPaidObject — behavior-preserving
+        // (these cards parsed as CostPaidObject before ObjectScope::Anaphoric existed).
+        ObjectScope::CostPaidObject | ObjectScope::Anaphoric => None,
     }
 }
 
@@ -2168,7 +2174,11 @@ where
         // priority between them; the engine's pinned `cost_paid_object`-first
         // choice stands. Exact parity with the `resolve_object_mana_value`
         // `CostPaidObject` arm.
-        ObjectScope::CostPaidObject => ability
+        //
+        // CR 608.2k: a triggered-ability anaphoric pronoun that escaped parse-time
+        // remapping resolves identically to CostPaidObject — behavior-preserving
+        // (these cards parsed as CostPaidObject before ObjectScope::Anaphoric existed).
+        ObjectScope::CostPaidObject | ObjectScope::Anaphoric => ability
             .and_then(|a| a.cost_paid_object.as_ref())
             .and_then(|snapshot| lki_extract(&snapshot.lki))
             .or_else(|| {
@@ -2257,7 +2267,11 @@ fn resolve_object_mana_value(
         // regression guard; slot 2 is inserted strictly between them
         // (insert-only). Exact parity with the `resolve_object_pt`
         // `CostPaidObject` arm.
-        ObjectScope::CostPaidObject => ability
+        //
+        // CR 608.2k: a triggered-ability anaphoric pronoun that escaped parse-time
+        // remapping resolves identically to CostPaidObject — behavior-preserving
+        // (these cards parsed as CostPaidObject before ObjectScope::Anaphoric existed).
+        ObjectScope::CostPaidObject | ObjectScope::Anaphoric => ability
             .and_then(|a| a.cost_paid_object.as_ref())
             .map(|snapshot| u32_to_i32_saturating(snapshot.lki.mana_value))
             .or_else(|| {
