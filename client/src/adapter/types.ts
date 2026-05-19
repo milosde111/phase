@@ -351,6 +351,47 @@ export type ManaCost =
   | { type: "Cost"; shards: string[]; generic: number }
   | { type: "SelfManaCost" };
 
+export type CastFrequency =
+  | "Unlimited"
+  | "OncePerTurn"
+  | "OncePerTurnPerPermanentType";
+
+export type CastingVariant =
+  | { type: "Normal" }
+  | { type: "Adventure" }
+  | { type: "Omen" }
+  | { type: "Warp" }
+  | { type: "Escape" }
+  | { type: "Retrace" }
+  | { type: "Harmonize" }
+  | { type: "Flashback" }
+  | { type: "Aftermath" }
+  | {
+      type: "GraveyardPermission";
+      data: {
+        source: ObjectId;
+        frequency: CastFrequency;
+        slot_type?: CoreType | null;
+        graveyard_destination_replacement?: Zone | null;
+      };
+    }
+  | { type: "HandPermission"; data: { source: ObjectId; frequency: CastFrequency } }
+  | { type: "Sneak"; data: { returned_creature: ObjectId; placement?: unknown | null } }
+  | { type: "WebSlinging"; data: { returned_creature: ObjectId } }
+  | { type: "Miracle" }
+  | { type: "Madness" }
+  | { type: "Evoke" }
+  | { type: "Suspend" }
+  | { type: "Plot" }
+  | { type: "Foretell" }
+  | { type: "Overload" }
+  | { type: "Bestow" };
+
+export interface CastingVariantChoiceOption {
+  variant: CastingVariant;
+  mana_cost: ManaCost;
+}
+
 export type UnlessCost =
   | { type: "Fixed"; cost: ManaCost }
   | { type: "DynamicGeneric"; quantity: unknown }
@@ -861,6 +902,7 @@ export type WaitingFor =
   | { type: "AdventureCastChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId } }
   | { type: "ModalFaceChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId } }
   | { type: "AlternativeCastChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId; keyword: { type: "Warp" } | { type: "Evoke" } | { type: "Overload" } | { type: "Bestow" }; normal_cost: ManaCost; alternative_cost: ManaCost } }
+  | { type: "CastingVariantChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId; options: CastingVariantChoiceOption[] } }
   | { type: "ChoosePermanentTypeSlot"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId; source: ObjectId; available_slots: CoreType[] } }
   | { type: "MultiTargetSelection"; data: { player: PlayerId; legal_targets: ObjectId[]; min_targets: number; max_targets: number; pending_ability: unknown } }
   | { type: "MiracleReveal"; data: { player: PlayerId; object_id: ObjectId; cost: ManaCost } }
@@ -1118,6 +1160,7 @@ export type GameAction =
   | { type: "ChooseAdventureFace"; data: { creature: boolean } }
   | { type: "ChooseModalFace"; data: { back_face: boolean } }
   | { type: "ChooseAlternativeCast"; data: { choice: { type: "Normal" } | { type: "Alternative" } } }
+  | { type: "ChooseCastingVariant"; data: { index: number } }
   | { type: "KeepAllCopyTargets" }
   | { type: "ChoosePermanentTypeSlot"; data: { slot: CoreType } }
   | { type: "CastSpellForFree"; data: { object_id: ObjectId; card_id: CardId; source_id: ObjectId } }

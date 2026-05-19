@@ -1432,6 +1432,23 @@ fn apply_action(
                 )?,
             }
         }
+        (
+            WaitingFor::CastingVariantChoice {
+                player,
+                object_id,
+                card_id,
+                options,
+            },
+            GameAction::ChooseCastingVariant { index },
+        ) => casting::handle_casting_variant_choice(
+            state,
+            *player,
+            *object_id,
+            *card_id,
+            options,
+            index,
+            &mut events,
+        )?,
         // CR 110.4: Player chose which permanent type slot to consume for a
         // multi-type graveyard cast via OncePerTurnPerPermanentType (Muldrotha).
         (

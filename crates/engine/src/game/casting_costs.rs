@@ -1550,6 +1550,17 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
         }
     }
 
+    // CR 702.81a: Retrace requires discarding a land card as an additional
+    // cost, then paying the card's normal mana cost.
+    if casting_variant == CastingVariant::Retrace {
+        let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
+        pending.casting_variant = casting_variant;
+        pending.cast_timing_permission = cast_timing_permission;
+        pending.distribute = distribute;
+        pending.origin_zone = origin_zone;
+        return pay_additional_cost(state, player, retrace_discard_land_cost(), pending, events);
+    }
+
     // CR 702.34a + CR 118.8: Flashback with a non-mana additional cost (Battle
     // Screech's "tap three white creatures") or a compound cost (Deep Analysis's
     // "{1}{U}, Pay 3 life") routes the residual non-mana sub-cost through
@@ -2107,6 +2118,25 @@ pub(super) fn effective_casualty_additional_cost(
         ])),
         count: 1,
     }))
+}
+
+pub(super) fn retrace_discard_land_cost() -> AbilityCost {
+    AbilityCost::Discard {
+        count: QuantityExpr::Fixed { value: 1 },
+        filter: Some(TargetFilter::Typed(TypedFilter::land())),
+        random: false,
+        self_ref: false,
+    }
+}
+
+pub(super) fn can_pay_retrace_additional_cost(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> bool {
+    let land_filter = TargetFilter::Typed(TypedFilter::land());
+    !super::casting::find_eligible_discard_targets(state, player, object_id, Some(&land_filter))
+        .is_empty()
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -214,7 +214,8 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
         | (WaitingFor::CombatTaxPayment { .. }, GameAction::PayCombatTax { .. })
         | (WaitingFor::AdventureCastChoice { .. }, GameAction::ChooseAdventureFace { .. })
         | (WaitingFor::ModalFaceChoice { .. }, GameAction::ChooseModalFace { .. })
-        | (WaitingFor::AlternativeCastChoice { .. }, GameAction::ChooseAlternativeCast { .. }) => {
+        | (WaitingFor::AlternativeCastChoice { .. }, GameAction::ChooseAlternativeCast { .. })
+        | (WaitingFor::CastingVariantChoice { .. }, GameAction::ChooseCastingVariant { .. }) => {
             false
         }
         // CR 107.1c + CR 107.14: Submitted amount must fall within [min, max].

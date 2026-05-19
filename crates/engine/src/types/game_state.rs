@@ -1162,6 +1162,15 @@ pub enum AlternativeCastKeyword {
     Bestow,
 }
 
+/// CR 601.2b: Engine-authored cast-variant option for spells with more than
+/// one legal casting permission from the same zone. The frontend displays this
+/// data and returns an index; it never reconstructs legality or variants.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CastingVariantChoiceOption {
+    pub variant: CastingVariant,
+    pub mana_cost: ManaCost,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum WaitingFor {
@@ -1624,6 +1633,14 @@ pub enum WaitingFor {
         /// The keyword-granted alternative mana cost (for display in the
         /// choice modal).
         alternative_cost: ManaCost,
+    },
+    /// CR 601.2b: Player chooses which legal cast permission / variant to use
+    /// when more than one applies to the same spell from the same zone.
+    CastingVariantChoice {
+        player: PlayerId,
+        object_id: ObjectId,
+        card_id: CardId,
+        options: Vec<CastingVariantChoiceOption>,
     },
     /// CR 110.4: Player chooses which permanent type slot to consume when
     /// casting/playing a multi-type card from the graveyard via a
@@ -2447,6 +2464,7 @@ impl WaitingFor {
             | WaitingFor::AdventureCastChoice { player, .. }
             | WaitingFor::ModalFaceChoice { player, .. }
             | WaitingFor::AlternativeCastChoice { player, .. }
+            | WaitingFor::CastingVariantChoice { player, .. }
             | WaitingFor::ChoosePermanentTypeSlot { player, .. }
             | WaitingFor::ChooseRingBearer { player, .. }
             | WaitingFor::ChooseDungeon { player, .. }
@@ -2711,6 +2729,9 @@ pub enum CastingVariant {
     /// CR 702.138: Cast from graveyard via Escape. On resolution, goes to
     /// appropriate zone normally (unlike Flashback which exiles).
     Escape,
+    /// CR 702.81a: Cast from graveyard via Retrace by discarding a land card as
+    /// an additional cost. Resolution uses normal spell routing.
+    Retrace,
     /// CR 702.180a: Cast from graveyard for harmonize cost. On resolution, exiled
     /// instead of going anywhere else (unlike Escape which returns to graveyard).
     Harmonize,

@@ -7,8 +7,8 @@ use crate::types::ability::{
 use crate::types::card::LayoutKind;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    CastingVariant, ConvokeMode, GameState, PendingCast, SneakPlacement, SpellCastRecord,
-    StackEntry, StackEntryKind, WaitingFor,
+    CastingVariant, CastingVariantChoiceOption, ConvokeMode, GameState, PendingCast,
+    SneakPlacement, SpellCastRecord, StackEntry, StackEntryKind, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::{FlashbackCost, Keyword, KeywordKind};
@@ -282,9 +282,9 @@ pub fn spell_objects_available_to_cast(state: &GameState, player: PlayerId) -> V
         })
     }));
 
-    // CR 702.34 / CR 702.127 / CR 702.138 / CR 702.180: Cards in graveyard with
-    // graveyard-cast keywords.
-    // Escape requires enough other graveyard cards to exile; Flashback and Harmonize have no such restriction.
+    // CR 702.34 / CR 702.81 / CR 702.127 / CR 702.138 / CR 702.180: Cards in
+    // graveyard with graveyard-cast keywords. Escape and Retrace must have
+    // enough eligible non-mana additional-cost material available.
     objects.extend(player_data.graveyard.iter().copied().filter(|&obj_id| {
         state.objects.get(&obj_id).is_some_and(|obj| {
             obj.owner == player
@@ -292,6 +292,7 @@ pub fn spell_objects_available_to_cast(state: &GameState, player: PlayerId) -> V
                 && (has_harmonize_keyword(obj)
                     || has_flashback_keyword(state, obj_id)
                     || has_aftermath_keyword(state, obj_id)
+                    || retrace_has_discardable_land(state, player, obj_id)
                     || graveyard_has_enough_for_escape(state, player, obj_id))
         })
     }));
@@ -380,6 +381,17 @@ fn has_harmonize_keyword(obj: &crate::game::game_object::GameObject) -> bool {
 /// CR 702.34: Check if an object has the Flashback keyword.
 fn has_flashback_keyword(state: &GameState, object_id: ObjectId) -> bool {
     super::keywords::object_has_effective_keyword_kind(state, object_id, KeywordKind::Flashback)
+}
+
+/// CR 702.81: Check if an object has the Retrace keyword.
+fn has_retrace_keyword(state: &GameState, object_id: ObjectId) -> bool {
+    super::keywords::object_has_effective_keyword_kind(state, object_id, KeywordKind::Retrace)
+}
+
+/// CR 702.81a: Retrace requires discarding a land card as an additional cost.
+fn retrace_has_discardable_land(state: &GameState, player: PlayerId, object_id: ObjectId) -> bool {
+    has_retrace_keyword(state, object_id)
+        && casting_costs::can_pay_retrace_additional_cost(state, player, object_id)
 }
 
 /// CR 702.127: Check if an object has the Aftermath keyword.
@@ -471,17 +483,18 @@ pub fn handle_foretell(
     Ok(WaitingFor::Priority { player })
 }
 
-// CR 702.34 (Flashback) / CR 702.127 (Aftermath) / CR 702.138 (Escape) / CR 702.180 (Harmonize):
-// graveyard-cast alternative costs. Sneak (CR 702.190a) is a HAND-cast
-// alt-cost and is deliberately NOT listed here — including it would
-// misclassify graveyard objects with a granted Sneak as castable from the
-// graveyard, which the rules do not permit.
+// CR 702.34 (Flashback) / CR 702.81 (Retrace) / CR 702.127 (Aftermath) /
+// CR 702.138 (Escape) / CR 702.180 (Harmonize): graveyard-cast alternative
+// permissions. Sneak (CR 702.190a) is a HAND-cast alt-cost and is deliberately
+// NOT listed here — including it would misclassify graveyard objects with a
+// granted Sneak as castable from the graveyard, which the rules do not permit.
 fn has_effective_graveyard_cast_keyword(
     state: &GameState,
     object_id: ObjectId,
     obj: &crate::game::game_object::GameObject,
 ) -> bool {
     super::keywords::object_has_effective_keyword_kind(state, object_id, KeywordKind::Escape)
+        || has_retrace_keyword(state, object_id)
         || obj
             .keywords
             .iter()
@@ -1395,6 +1408,126 @@ fn prepare_spell_cast_with_variant_override(
     )
 }
 
+#[derive(Debug)]
+struct CastingVariantChoiceSet {
+    options: Vec<CastingVariantChoiceOption>,
+    had_multiple_candidates: bool,
+}
+
+fn casting_variant_choice_set(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> CastingVariantChoiceSet {
+    let mut candidates = casting_variant_candidates(state, player, object_id);
+    candidates.dedup();
+    let had_multiple_candidates = candidates.len() > 1;
+    let mut options = Vec::new();
+
+    for variant in candidates {
+        let Ok(prepared) =
+            prepare_spell_cast_with_variant_override(state, player, object_id, Some(variant))
+        else {
+            continue;
+        };
+        if !can_cast_prepared_now(state, player, &prepared) {
+            continue;
+        }
+        options.push(CastingVariantChoiceOption {
+            variant: prepared.casting_variant,
+            mana_cost: prepared.mana_cost,
+        });
+    }
+
+    CastingVariantChoiceSet {
+        options,
+        had_multiple_candidates,
+    }
+}
+
+fn casting_variant_candidates(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> Vec<CastingVariant> {
+    let Some(obj) = state.objects.get(&object_id) else {
+        return Vec::new();
+    };
+    let mut candidates = Vec::new();
+
+    if obj.zone == Zone::Graveyard {
+        if super::keywords::object_has_effective_keyword_kind(state, object_id, KeywordKind::Escape)
+        {
+            candidates.push(CastingVariant::Escape);
+        }
+        if has_retrace_keyword(state, object_id) {
+            candidates.push(CastingVariant::Retrace);
+        }
+        if obj
+            .keywords
+            .iter()
+            .any(|k| matches!(k, crate::types::keywords::Keyword::Harmonize(_)))
+        {
+            candidates.push(CastingVariant::Harmonize);
+        }
+        if super::keywords::effective_flashback_cost(state, object_id).is_some() {
+            candidates.push(CastingVariant::Flashback);
+        }
+        if has_aftermath_keyword(state, object_id) {
+            candidates.push(CastingVariant::Aftermath);
+        }
+        if let Some(source) = graveyard_permission_source(state, player, object_id) {
+            let slot_type = if source.frequency == CastFrequency::OncePerTurnPerPermanentType {
+                let slots = available_permanent_type_slots(state, source.source_id, object_id);
+                if slots.len() == 1 {
+                    Some(slots[0])
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            candidates.push(CastingVariant::GraveyardPermission {
+                source: source.source_id,
+                frequency: source.frequency,
+                slot_type,
+                graveyard_destination_replacement: source.graveyard_destination_replacement,
+            });
+        }
+    }
+
+    if obj.zone == Zone::Exile {
+        let has_alt_cost = obj
+            .casting_permissions
+            .iter()
+            .any(|p| matches!(p, CastingPermission::ExileWithAltCost { .. }));
+        if has_alt_cost
+            && obj
+                .keywords
+                .iter()
+                .any(|k| matches!(k, crate::types::keywords::Keyword::Suspend { .. }))
+        {
+            candidates.push(CastingVariant::Suspend);
+        }
+        if obj
+            .casting_permissions
+            .iter()
+            .any(|p| matches!(p, CastingPermission::Plotted { .. }))
+        {
+            candidates.push(CastingVariant::Plot);
+        }
+        if obj
+            .casting_permissions
+            .iter()
+            .any(|p| matches!(p, CastingPermission::Foretold { .. }))
+        {
+            candidates.push(CastingVariant::Foretell);
+        }
+    }
+
+    candidates
+}
+
 fn prepare_spell_cast_with_variant_override_inner(
     state: &GameState,
     player: PlayerId,
@@ -1416,7 +1549,8 @@ fn prepare_spell_cast_with_variant_override_inner(
             .keywords
             .iter()
             .any(|k| matches!(k, crate::types::keywords::Keyword::Madness(_)));
-    // CR 702.34 / CR 702.138 / CR 702.180: Cards in graveyard with graveyard-cast keywords.
+    // CR 702.34 / CR 702.81 / CR 702.138 / CR 702.180: Cards in graveyard with
+    // graveyard-cast keywords.
     let has_escape = obj.zone == Zone::Graveyard
         && super::keywords::object_has_effective_keyword_kind(
             state,
@@ -1649,7 +1783,7 @@ fn prepare_spell_cast_with_variant_override_inner(
     let (flashback_mana_cost, flashback_non_mana_cost) =
         split_flashback_cost_components(flashback_cost.as_ref());
 
-    // Precedence: Escape > Harmonize > Flashback > Aftermath > GraveyardPermission > Warp > Normal.
+    // Precedence: Escape > Retrace > Harmonize > Flashback > Aftermath > GraveyardPermission > Warp > Normal.
     // No standard card has multiple graveyard-cast keywords; if one did, the card's own
     // keyword overrides an external source's grant (GraveyardPermission).
     //
@@ -1698,6 +1832,8 @@ fn prepare_spell_cast_with_variant_override_inner(
             CastingVariant::Foretell
         } else if escape_cost.is_some() {
             CastingVariant::Escape
+        } else if has_retrace_keyword(state, object_id) && obj.zone == Zone::Graveyard {
+            CastingVariant::Retrace
         } else if harmonize_cost.is_some() {
             CastingVariant::Harmonize
         } else if flashback_cost.is_some() {
@@ -1832,16 +1968,37 @@ fn prepare_spell_cast_with_variant_override_inner(
     // For compound flashback costs ("{1}{U}, Pay 3 life") we still want the mana
     // sub-cost paid normally — `flashback_mana_cost` is `Some` in that case and is
     // selected by the `else` branch below.
-    let pure_non_mana_flashback =
-        flashback_non_mana_cost.is_some() && flashback_mana_cost.is_none();
+    let pure_non_mana_flashback = casting_variant == CastingVariant::Flashback
+        && flashback_non_mana_cost.is_some()
+        && flashback_mana_cost.is_none();
     // CR 702.170d: Plot casts are always free — the Plotted permission encodes
     // "without paying its mana cost". Zero the mana cost at preparation time,
     // mirroring the hand-free / flashback-non-mana paths above.
+    let effective_warp_cost_for_path = if casting_variant == CastingVariant::Warp {
+        warp_cost
+    } else {
+        None
+    };
+    let effective_escape_cost_for_path = if casting_variant == CastingVariant::Escape {
+        escape_cost
+    } else {
+        None
+    };
+    let effective_harmonize_cost_for_path = if casting_variant == CastingVariant::Harmonize {
+        harmonize_cost
+    } else {
+        None
+    };
+    let effective_flashback_mana_cost_for_path = if casting_variant == CastingVariant::Flashback {
+        flashback_mana_cost
+    } else {
+        None
+    };
     let mut mana_cost = if energy_cost_from_exile
         || hand_cast_free
         || is_hand_permission_variant
         || pure_non_mana_flashback
-        || is_plot_cast
+        || casting_variant == CastingVariant::Plot
     {
         crate::types::mana::ManaCost::NoCost
     } else {
@@ -1850,13 +2007,13 @@ fn prepare_spell_cast_with_variant_override_inner(
             .or(evoke_cost)
             .or(overload_cost)
             .or(bestow_cost)
-            .or(escape_cost)
-            .or(harmonize_cost)
-            .or(flashback_mana_cost)
+            .or(effective_escape_cost_for_path)
+            .or(effective_harmonize_cost_for_path)
+            .or(effective_flashback_mana_cost_for_path)
             .or(effective_sneak_cost_for_path)
             .or(effective_web_slinging_cost_for_path)
             .or(alt_cost_from_exile)
-            .or(warp_cost)
+            .or(effective_warp_cost_for_path)
             .unwrap_or_else(|| obj.mana_cost.clone())
     };
     let has_granted_flash =
@@ -3145,6 +3302,91 @@ fn continue_cast_from_prepared(
     continue_with_prepared(state, player, prepared, events)
 }
 
+fn continue_cast_with_variant(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    variant: CastingVariant,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    if let CastingVariant::GraveyardPermission {
+        source,
+        frequency: CastFrequency::OncePerTurnPerPermanentType,
+        slot_type: None,
+        ..
+    } = variant
+    {
+        let slots = available_permanent_type_slots(state, source, object_id);
+        if slots.len() > 1 {
+            let card_id = state
+                .objects
+                .get(&object_id)
+                .map(|obj| obj.card_id)
+                .ok_or_else(|| EngineError::InvalidAction("Object not found".to_string()))?;
+            return Ok(WaitingFor::ChoosePermanentTypeSlot {
+                player,
+                object_id,
+                card_id,
+                source,
+                available_slots: slots,
+            });
+        }
+    }
+
+    if variant == CastingVariant::Bestow {
+        if let Some(obj) = state.objects.get_mut(&object_id) {
+            apply_bestow_aura_form(obj);
+        }
+        let prepared =
+            match prepare_spell_cast_with_variant_override(state, player, object_id, Some(variant))
+            {
+                Ok(prepared) => prepared,
+                Err(err) => {
+                    revert_bestow_form(state, object_id);
+                    return Err(err);
+                }
+            };
+        return continue_with_prepared(state, player, prepared, events);
+    }
+
+    let prepared =
+        prepare_spell_cast_with_variant_override(state, player, object_id, Some(variant))?;
+    continue_with_prepared(state, player, prepared, events)
+}
+
+pub fn handle_casting_variant_choice(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    card_id: CardId,
+    options: &[CastingVariantChoiceOption],
+    index: usize,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let obj = state
+        .objects
+        .get(&object_id)
+        .ok_or_else(|| EngineError::InvalidAction("Object not found".to_string()))?;
+    if obj.card_id != card_id {
+        return Err(EngineError::InvalidAction(format!(
+            "Object {object_id:?} does not match card_id {card_id:?}"
+        )));
+    }
+    let option = options
+        .get(index)
+        .ok_or_else(|| EngineError::InvalidAction("Invalid cast variant choice".to_string()))?;
+    let fresh_options = casting_variant_choice_set(state, player, object_id).options;
+    if !fresh_options
+        .iter()
+        .any(|fresh| fresh.variant == option.variant)
+    {
+        return Err(EngineError::ActionNotAllowed(
+            "Chosen cast variant is no longer legal".to_string(),
+        ));
+    }
+    continue_cast_with_variant(state, player, object_id, option.variant, events)
+}
+
 /// CR 702.190a + b: Cast a spell from HAND via the Sneak alternative cost.
 ///
 /// Per CR 702.190a, "Sneak [cost]" reads: "Any time you could cast an instant
@@ -3557,6 +3799,21 @@ pub fn handle_cast_spell(
                 object_id,
                 card_id,
             });
+        }
+    }
+
+    let variant_choices = casting_variant_choice_set(state, player, object_id);
+    if variant_choices.options.len() > 1 {
+        return Ok(WaitingFor::CastingVariantChoice {
+            player,
+            object_id,
+            card_id,
+            options: variant_choices.options,
+        });
+    }
+    if variant_choices.had_multiple_candidates {
+        if let Some(option) = variant_choices.options.first() {
+            return continue_cast_with_variant(state, player, object_id, option.variant, events);
         }
     }
 
@@ -4412,8 +4669,20 @@ pub fn can_cast_object_now(state: &GameState, player: PlayerId, object_id: Objec
         return false;
     }
     let Ok(prepared) = prepare_spell_cast(state, player, object_id) else {
-        return false;
+        let choices = casting_variant_choice_set(state, player, object_id);
+        return !choices.options.is_empty();
     };
+    can_cast_prepared_now(state, player, &prepared)
+        || !casting_variant_choice_set(state, player, object_id)
+            .options
+            .is_empty()
+}
+
+fn can_cast_prepared_now(
+    state: &GameState,
+    player: PlayerId,
+    prepared: &PreparedSpellCast,
+) -> bool {
     let Some(obj) = state.objects.get(&prepared.object_id) else {
         return false;
     };
@@ -4436,6 +4705,13 @@ pub fn can_cast_object_now(state: &GameState, player: PlayerId, object_id: Objec
     // CR 702.138: Escape requires enough other graveyard cards to exile.
     if prepared.casting_variant == CastingVariant::Escape
         && !graveyard_has_enough_for_escape(state, player, prepared.object_id)
+    {
+        return false;
+    }
+
+    // CR 702.81a: Retrace requires a discardable land card in hand.
+    if prepared.casting_variant == CastingVariant::Retrace
+        && !casting_costs::can_pay_retrace_additional_cost(state, player, prepared.object_id)
     {
         return false;
     }
@@ -4504,10 +4780,10 @@ pub fn can_cast_object_now(state: &GameState, player: PlayerId, object_id: Objec
     // and will prompt AdventureCastChoice.
     if alternative_spell_layout(obj).is_some() {
         let mut sim = state.clone();
-        if let Some(sim_obj) = sim.objects.get_mut(&object_id) {
+        if let Some(sim_obj) = sim.objects.get_mut(&prepared.object_id) {
             swap_to_alternative_spell_face(sim_obj);
         }
-        return can_cast_object_now(&sim, player, object_id);
+        return can_cast_object_now(&sim, player, prepared.object_id);
     }
 
     false
@@ -16303,6 +16579,280 @@ mod tests {
         Arc::make_mut(&mut obj.abilities).push(ability.clone());
         Arc::make_mut(&mut obj.base_abilities).push(ability);
         obj_id
+    }
+
+    fn add_retrace_sorcery_to_graveyard(state: &mut GameState, player: PlayerId) -> ObjectId {
+        let card_id = CardId(state.next_object_id);
+        let obj_id = create_object(
+            state,
+            card_id,
+            player,
+            "Flame Jab".to_string(),
+            Zone::Graveyard,
+        );
+        let obj = state.objects.get_mut(&obj_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Sorcery);
+        obj.base_card_types = obj.card_types.clone();
+        obj.mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 0,
+        };
+        obj.base_mana_cost = obj.mana_cost.clone();
+        obj.base_keywords.push(Keyword::Retrace);
+        obj.keywords = obj.base_keywords.clone();
+        let ability = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Unimplemented {
+                name: "retrace test spell".to_string(),
+                description: None,
+            },
+        );
+        Arc::make_mut(&mut obj.abilities).push(ability.clone());
+        Arc::make_mut(&mut obj.base_abilities).push(ability);
+        obj_id
+    }
+
+    fn add_land_to_hand(state: &mut GameState, player: PlayerId, name: &str) -> ObjectId {
+        let land_id = create_object(
+            state,
+            CardId(state.next_object_id),
+            player,
+            name.to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&land_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        obj.base_card_types = obj.card_types.clone();
+        land_id
+    }
+
+    fn add_nonland_to_hand(state: &mut GameState, player: PlayerId, name: &str) -> ObjectId {
+        let card_id = create_object(
+            state,
+            CardId(state.next_object_id),
+            player,
+            name.to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&card_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Sorcery);
+        obj.base_card_types = obj.card_types.clone();
+        card_id
+    }
+
+    #[test]
+    fn retrace_graveyard_spell_surfaces_when_land_discard_and_mana_are_payable() {
+        let mut state = setup_game_at_main_phase();
+        let spell = add_retrace_sorcery_to_graveyard(&mut state, PlayerId(0));
+        add_land_to_hand(&mut state, PlayerId(0), "Mountain");
+        add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
+
+        assert!(
+            spell_objects_available_to_cast(&state, PlayerId(0)).contains(&spell),
+            "retrace card with a discardable land should be in the graveyard castable set"
+        );
+        assert!(can_cast_object_now(&state, PlayerId(0), spell));
+
+        let (actions, _, grouped) = crate::ai_support::legal_actions_full(&state);
+        assert!(
+            actions
+                .iter()
+                .any(|action| matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == spell)),
+            "flat legal actions should include CastSpell for the retrace card"
+        );
+        assert!(
+            grouped.get(&spell).is_some_and(|actions| {
+                actions
+                    .iter()
+                    .any(|action| matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == spell))
+            }),
+            "legal_actions_by_object should group CastSpell under the graveyard object"
+        );
+    }
+
+    #[test]
+    fn graveyard_spell_with_flashback_and_retrace_prompts_for_cast_variant() {
+        let mut state = setup_game_at_main_phase();
+        let spell = add_retrace_sorcery_to_graveyard(&mut state, PlayerId(0));
+        add_land_to_hand(&mut state, PlayerId(0), "Mountain");
+        add_mana(&mut state, PlayerId(0), ManaType::Red, 2);
+        let card_id = state.objects.get(&spell).unwrap().card_id;
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.base_keywords
+                .push(Keyword::Flashback(FlashbackCost::Mana(ManaCost::Cost {
+                    shards: vec![ManaCostShard::Red],
+                    generic: 0,
+                })));
+            obj.keywords = obj.base_keywords.clone();
+        }
+
+        let result = crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: spell,
+                card_id,
+                targets: vec![],
+            },
+        )
+        .expect("casting a spell with multiple graveyard variants should prompt");
+
+        let retrace_index = match result.waiting_for {
+            WaitingFor::CastingVariantChoice {
+                player, options, ..
+            } => {
+                assert_eq!(player, PlayerId(0));
+                assert!(options
+                    .iter()
+                    .any(|option| option.variant == CastingVariant::Flashback));
+                options
+                    .iter()
+                    .position(|option| option.variant == CastingVariant::Retrace)
+                    .expect("Retrace should be an offered cast variant")
+            }
+            other => panic!("expected CastingVariantChoice, got {other:?}"),
+        };
+        assert!(crate::ai_support::legal_actions(&state)
+            .iter()
+            .any(|action| {
+                matches!(
+                    action,
+                    GameAction::ChooseCastingVariant { index } if *index == retrace_index
+                )
+            }));
+
+        let result = crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::ChooseCastingVariant {
+                index: retrace_index,
+            },
+        )
+        .expect("choosing Retrace should continue the cast");
+
+        assert!(matches!(
+            result.waiting_for,
+            WaitingFor::DiscardForCost { .. }
+        ));
+    }
+
+    #[test]
+    fn retrace_cast_discards_only_land_then_pushes_spell_with_retrace_variant() {
+        let mut state = setup_game_at_main_phase();
+        let spell = add_retrace_sorcery_to_graveyard(&mut state, PlayerId(0));
+        let land = add_land_to_hand(&mut state, PlayerId(0), "Mountain");
+        let nonland = add_nonland_to_hand(&mut state, PlayerId(0), "Spare Spell");
+        add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
+        let card_id = state.objects.get(&spell).unwrap().card_id;
+
+        let waiting = handle_cast_spell(&mut state, PlayerId(0), spell, card_id, &mut Vec::new())
+            .expect("retrace cast should request land discard");
+        let (cards, pending_cast) = match waiting {
+            WaitingFor::DiscardForCost {
+                player,
+                count: 1,
+                cards,
+                pending_cast,
+            } => {
+                assert_eq!(player, PlayerId(0));
+                (cards, pending_cast)
+            }
+            other => panic!("expected DiscardForCost, got {other:?}"),
+        };
+        assert_eq!(cards, vec![land]);
+        assert!(!cards.contains(&nonland));
+
+        let mut events = Vec::new();
+        let resumed = super::casting_costs::handle_discard_for_cost(
+            &mut state,
+            PlayerId(0),
+            *pending_cast,
+            1,
+            &cards,
+            &[land],
+            &mut events,
+        )
+        .expect("discarding a land should finish retrace cost payment");
+
+        assert!(matches!(resumed, WaitingFor::Priority { .. }));
+        assert_eq!(state.objects.get(&land).unwrap().zone, Zone::Graveyard);
+        assert_eq!(state.objects.get(&spell).unwrap().zone, Zone::Stack);
+        assert_eq!(state.stack.len(), 1);
+        assert!(matches!(
+            state.stack[0].kind,
+            StackEntryKind::Spell {
+                casting_variant: CastingVariant::Retrace,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn retrace_without_discardable_land_is_not_a_legal_cast_action() {
+        let mut state = setup_game_at_main_phase();
+        let spell = add_retrace_sorcery_to_graveyard(&mut state, PlayerId(0));
+        add_nonland_to_hand(&mut state, PlayerId(0), "Spare Spell");
+        add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
+
+        assert!(
+            !spell_objects_available_to_cast(&state, PlayerId(0)).contains(&spell),
+            "retrace card without a discardable land should not be in the graveyard castable set"
+        );
+        assert!(!can_cast_object_now(&state, PlayerId(0), spell));
+
+        let (actions, _, grouped) = crate::ai_support::legal_actions_full(&state);
+        assert!(
+            !actions
+                .iter()
+                .any(|action| matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == spell)),
+            "flat legal actions must not expose unpayable retrace"
+        );
+        assert!(
+            grouped.get(&spell).is_none_or(|actions| {
+                !actions
+                    .iter()
+                    .any(|action| matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == spell))
+            }),
+            "grouped legal actions must not expose unpayable retrace"
+        );
+    }
+
+    #[test]
+    fn retrace_spell_resolves_to_graveyard_not_exile() {
+        let mut state = setup_game_at_main_phase();
+        let spell = add_retrace_sorcery_to_graveyard(&mut state, PlayerId(0));
+        let land = add_land_to_hand(&mut state, PlayerId(0), "Mountain");
+        add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
+        let card_id = state.objects.get(&spell).unwrap().card_id;
+
+        let waiting = handle_cast_spell(&mut state, PlayerId(0), spell, card_id, &mut Vec::new())
+            .expect("retrace cast should start");
+        let (cards, pending_cast) = match waiting {
+            WaitingFor::DiscardForCost {
+                cards,
+                pending_cast,
+                ..
+            } => (cards, pending_cast),
+            other => panic!("expected DiscardForCost, got {other:?}"),
+        };
+        super::casting_costs::handle_discard_for_cost(
+            &mut state,
+            PlayerId(0),
+            *pending_cast,
+            1,
+            &cards,
+            &[land],
+            &mut Vec::new(),
+        )
+        .expect("discarding land should put retrace spell on stack");
+
+        let mut events = Vec::new();
+        crate::game::stack::resolve_top(&mut state, &mut events);
+
+        assert_eq!(state.objects.get(&spell).unwrap().zone, Zone::Graveyard);
+        assert!(
+            !state.exile.contains(&spell),
+            "Retrace has no flashback-style exile replacement"
+        );
     }
 
     fn add_echo_of_eons_to_graveyard(state: &mut GameState) -> ObjectId {

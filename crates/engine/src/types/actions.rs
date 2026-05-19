@@ -247,6 +247,11 @@ pub enum GameAction {
     ChooseAlternativeCast {
         choice: AlternativeCastDecision,
     },
+    /// CR 601.2b: Resolve a `WaitingFor::CastingVariantChoice` by selecting
+    /// one of the engine-authored options by index.
+    ChooseCastingVariant {
+        index: usize,
+    },
     /// CR 707.10c: Resolve a `WaitingFor::CopyRetarget` by leaving every
     /// remaining slot's target unchanged. Single action so the UI can offer
     /// "Keep Current Targets" without N round-trips through `ChooseTarget`.
@@ -945,6 +950,7 @@ impl GameAction {
             | GameAction::ChooseAdventureFace { .. }
             | GameAction::ChooseModalFace { .. }
             | GameAction::ChooseAlternativeCast { .. }
+            | GameAction::ChooseCastingVariant { .. }
             | GameAction::KeepAllCopyTargets
             | GameAction::ChoosePermanentTypeSlot { .. }
             | GameAction::DecideOptionalEffect { .. }

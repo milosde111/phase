@@ -75,12 +75,12 @@ export function ZoneViewer({ zone, playerId, onClose }: ZoneViewerProps) {
             innerClassName="flex items-center gap-2 lg:gap-3"
           >
             {cards.map((obj) => {
-              // CR 702.143a + CR 715.3a + CR 702.62a + CR 702.170d + CR 702.185a:
+              // CR 702.81a + CR 702.143a + CR 715.3a + CR 702.62a + CR 702.170d + CR 702.185a:
               // Engine surfaces a CastSpell-family action for every legally
-              // castable exile-zone card (Adventure, Foretell, Suspend, Plot,
-              // Warp, etc.). The zone viewer surfaces whatever the engine
-              // reports — no per-mechanic permission inspection.
-              const castActions = zone === "exile" && isMyZone && hasPriority
+              // castable owner-viewed graveyard/exile card (Retrace, Adventure,
+              // Foretell, Suspend, Plot, Warp, etc.). The zone viewer surfaces
+              // whatever the engine reports — no per-mechanic permission inspection.
+              const castActions = (zone === "graveyard" || zone === "exile") && isMyZone && hasPriority
                 ? playOrCastActionsForObject(legalActionsByObject, obj.id)
                 : [];
               const isValidTarget = currentLegalTargets.has(obj.id);

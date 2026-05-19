@@ -1251,6 +1251,19 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                 Some(*player),
             ),
         ],
+        WaitingFor::CastingVariantChoice {
+            player, options, ..
+        } => options
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                candidate(
+                    GameAction::ChooseCastingVariant { index },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
         WaitingFor::ChoosePermanentTypeSlot {
             player,
             available_slots,
