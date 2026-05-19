@@ -8745,9 +8745,26 @@ fn try_parse_graveyard_cast_permission(text: &str, lower: &str) -> Option<Static
     Some(def)
 }
 
+/// CR 601.3 + CR 113.6b: Parse the affected-card filter of a graveyard
+/// cast-permission ability. When the filter text is a self-reference phrase
+/// ("this card", "this creature", "this permanent", ...), the permission
+/// applies only to the source card itself, so it lowers to
+/// `TargetFilter::SelfRef`. The returned `bool` is the `self_ref_permission`
+/// flag: when `true`, the caller restricts the static to
+/// `active_zones: [Graveyard]` (CR 113.6b — a zone-restricted ability functions
+/// only from the zones it names). A non-self-reference filter (e.g. a creature
+/// type) falls through to `parse_type_phrase` and is not zone-restricted here.
 fn parse_graveyard_permission_filter(input: &str) -> (TargetFilter, bool) {
-    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("this card").parse(input) {
-        if rest.is_empty() {
+    // The self-reference token `~` is substituted for type phrases ("this
+    // creature", "this permanent", ...) by `normalize_self_references` before
+    // this parser runs; `SELF_REF_PARSE_ONLY_PHRASES` (e.g. "this card") are
+    // *excluded* from that normalization and reach this function verbatim. Both
+    // forms denote the permission's own source card.
+    for phrase in std::iter::once("~").chain(SELF_REF_PARSE_ONLY_PHRASES.iter().copied()) {
+        if all_consuming(tag::<_, _, OracleError<'_>>(phrase))
+            .parse(input)
+            .is_ok()
+        {
             return (TargetFilter::SelfRef, true);
         }
     }
@@ -13272,6 +13289,36 @@ mod tests {
             }
             other => panic!("expected Zombie presence condition, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn graveyard_cast_permission_scourge_of_nel_toth_self_ref() {
+        // Regression for #525: Scourge of Nel Toth's "this creature" self-reference
+        // is normalized to the `~` token by `normalize_self_references` before the
+        // static parser runs (unlike "this card", which is parse-only and survives
+        // normalization). The `~` filter must lower to TargetFilter::SelfRef, NOT an
+        // empty match-all Typed filter (which would grant permission to cast ANY
+        // graveyard card).
+        let text = "You may cast ~ from your graveyard by paying {B}{B} \
+                    and sacrificing two creatures rather than paying its mana cost.";
+        let def = parse_static_line(text).expect("should parse Scourge of Nel Toth text");
+        assert!(matches!(
+            def.mode,
+            StaticMode::GraveyardCastPermission {
+                frequency: CastFrequency::Unlimited,
+                play_mode: CardPlayMode::Cast,
+                ..
+            }
+        ));
+        // The bug: affected was Typed { type_filters: [], .. } (match-all).
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+        // Self-ref permission must be zone-restricted to the graveyard (CR 113.6b).
+        assert_eq!(def.active_zones, vec![Zone::Graveyard]);
+        // Explicitly reject the buggy empty-Typed shape.
+        assert!(
+            !matches!(def.affected, Some(TargetFilter::Typed(_))),
+            "graveyard-cast permission must not be a match-all Typed filter"
+        );
     }
 
     /// CR 601.3 + CR 113.6b: Oathsworn Vampire — "You may cast this card from
