@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
 
+import type { PendingTriggerSummary } from "../../adapter/types.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { DialogShell } from "./DialogShell.tsx";
+
+const EMPTY_TRIGGER_SUMMARIES: PendingTriggerSummary[] = [];
 
 /**
  * CR 603.3b: Surfaced when the local player must choose the order in which
@@ -17,18 +20,19 @@ export function TriggerOrderModal() {
   const dispatch = useGameStore((s) => s.dispatch);
 
   const isOrderTriggers = waitingFor?.type === "OrderTriggers";
-  const engineTriggers = isOrderTriggers ? waitingFor.data.triggers : [];
+  const engineTriggers = isOrderTriggers
+    ? waitingFor.data.triggers
+    : EMPTY_TRIGGER_SUMMARIES;
 
   // Local UI state: the chosen permutation (indices into engineTriggers).
-  // Starts as identity. Reset whenever the engine sends a new prompt
-  // (detected by length change — successive groups across APNAP are distinct
-  // prompts and rebind triggers to fresh indices).
+  // Starts as identity. Reset whenever the engine sends a new prompt because
+  // successive CR 603.3b groups can have the same trigger count.
   const [order, setOrder] = useState<number[]>(() =>
     engineTriggers.map((_, i) => i),
   );
   useEffect(() => {
     setOrder(engineTriggers.map((_, i) => i));
-  }, [engineTriggers.length, isOrderTriggers]);
+  }, [engineTriggers, isOrderTriggers]);
 
   const move = useCallback((from: number, to: number) => {
     setOrder((prev) => {

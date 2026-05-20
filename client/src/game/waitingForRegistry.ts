@@ -75,6 +75,7 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "AssignCombatDamage",
     "CombatTaxPayment",
     // Triggers / resolution-time choices
+    "OrderTriggers",
     "ReplacementChoice",
     "CopyTargetChoice",
     "CopyRetarget",
