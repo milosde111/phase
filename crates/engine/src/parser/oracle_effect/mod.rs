@@ -1995,6 +1995,51 @@ fn try_parse_unless_three_branch_choice(
     }))
 }
 
+/// CR 111.2 + CR 608.2d: Token-choice clauses can elide the repeated verb:
+/// "create a Food token or a Treasure token" means the controller chooses one
+/// of two token-creation instructions as the ability resolves.
+///
+/// The generic `A or B` splitter intentionally requires both halves to be
+/// complete imperatives. This helper handles the shared-leading-verb token
+/// grammar by parsing each token noun phrase through `token::try_parse_token`
+/// and wrapping the resulting normal token effects in `ChooseOneOf`.
+fn try_parse_create_token_choice(
+    tp: TextPair<'_>,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
+    let ((), after_create_original) = nom_on_lower(tp.original, tp.lower, |i| {
+        value((), tag("create ")).parse(i)
+    })?;
+    let consumed = tp.original.len() - after_create_original.len();
+    let after_create = TextPair::new(after_create_original, &tp.lower[consumed..]);
+    let (left, right) = after_create.split_around(" or ")?;
+
+    if nom_primitives::split_once_on(left.lower, " or ").is_ok()
+        || nom_primitives::split_once_on(right.lower, " or ").is_ok()
+    {
+        return None;
+    }
+
+    let left_text = left.original.trim();
+    let right_text = right.original.trim();
+    if left_text.is_empty() || right_text.is_empty() {
+        return None;
+    }
+
+    let left_effect = token::try_parse_token(left.lower, left_text, ctx)?;
+    let right_effect = token::try_parse_token(right.lower, right_text, ctx)?;
+
+    let mut left_def = AbilityDefinition::new(AbilityKind::Spell, left_effect);
+    left_def.description = Some(format!("create {left_text}"));
+    let mut right_def = AbilityDefinition::new(AbilityKind::Spell, right_effect);
+    right_def.description = Some(format!("create {right_text}"));
+
+    Some(parsed_clause(Effect::ChooseOneOf {
+        chooser: PlayerFilter::Controller,
+        branches: vec![left_def, right_def],
+    }))
+}
+
 /// CR 700.2 + CR 608.2d: Detect inline binary-choice imperatives of the form
 /// "A or B" where both A and B parse independently as supported effects.
 /// Emits `Effect::ChooseOneOf { branches: [A, B] }` so the second branch is
@@ -2973,6 +3018,13 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     // "unless that player" pattern is matched before the left half is misread as
     // just the default consequence (losing the avoidance alternative).
     if let Some(clause) = try_parse_unless_three_branch_choice(tp, ctx) {
+        return clause;
+    }
+
+    // CR 111.2 + CR 608.2d: Shared-verb token choice — must run before the
+    // generic inline splitter and token dispatch so "create a Food token or a
+    // Treasure token" does not collapse to the first token branch.
+    if let Some(clause) = try_parse_create_token_choice(tp, ctx) {
         return clause;
     }
 
@@ -32812,6 +32864,36 @@ mod tests {
                     matches!(&*branches[1].effect, Effect::Sacrifice { .. }),
                     "second branch is Sacrifice"
                 );
+            }
+            other => panic!("expected ChooseOneOf, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn choose_one_of_detects_shared_create_token_verb() {
+        let ability = parse_effect_chain(
+            "Create a Food token or a Treasure token.",
+            AbilityKind::Spell,
+        );
+
+        match &*ability.effect {
+            Effect::ChooseOneOf { chooser, branches } => {
+                assert_eq!(*chooser, PlayerFilter::Controller);
+                assert_eq!(branches.len(), 2);
+                match &*branches[0].effect {
+                    Effect::Token { name, types, .. } => {
+                        assert_eq!(name, "Food");
+                        assert_eq!(types, &vec!["Artifact".to_string(), "Food".to_string()]);
+                    }
+                    other => panic!("expected Food token branch, got {other:?}"),
+                }
+                match &*branches[1].effect {
+                    Effect::Token { name, types, .. } => {
+                        assert_eq!(name, "Treasure");
+                        assert_eq!(types, &vec!["Artifact".to_string(), "Treasure".to_string()]);
+                    }
+                    other => panic!("expected Treasure token branch, got {other:?}"),
+                }
             }
             other => panic!("expected ChooseOneOf, got {other:?}"),
         }
