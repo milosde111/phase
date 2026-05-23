@@ -62,6 +62,44 @@ fn filter_references_self(filter: &TargetFilter) -> bool {
     }
 }
 
+fn with_owner_scope(filter: TargetFilter, controller: ControllerRef) -> TargetFilter {
+    match filter {
+        TargetFilter::Typed(mut typed) => {
+            if !typed
+                .properties
+                .iter()
+                .any(|prop| matches!(prop, FilterProp::Owned { .. }))
+            {
+                typed.properties.push(FilterProp::Owned { controller });
+            }
+            TargetFilter::Typed(typed)
+        }
+        TargetFilter::Or { filters } => TargetFilter::Or {
+            filters: filters
+                .into_iter()
+                .map(|filter| with_owner_scope(filter, controller.clone()))
+                .collect(),
+        },
+        TargetFilter::And { filters } => TargetFilter::And {
+            filters: filters
+                .into_iter()
+                .map(|filter| with_owner_scope(filter, controller.clone()))
+                .collect(),
+        },
+        TargetFilter::Not { filter } => TargetFilter::Not {
+            filter: Box::new(with_owner_scope(*filter, controller)),
+        },
+        other => TargetFilter::And {
+            filters: vec![
+                other,
+                TargetFilter::Typed(
+                    TypedFilter::card().properties(vec![FilterProp::Owned { controller }]),
+                ),
+            ],
+        },
+    }
+}
+
 fn self_recursion_trigger_zone(ability: &crate::types::ability::AbilityDefinition) -> Option<Zone> {
     match ability.effect.as_ref() {
         crate::types::ability::Effect::ChangeZone {
@@ -5556,7 +5594,7 @@ fn try_parse_one_or_more_leave_graveyard(lower: &str) -> Option<(TriggerMode, Tr
 
         // Parse subject type filter: "creature cards", "artifact and/or creature cards", "cards"
         let filter = if subject_text == "cards" {
-            None
+            TargetFilter::Typed(TypedFilter::card())
         } else if let Some(type_text) = subject_text.strip_suffix(" cards") {
             // Handle "artifact and/or creature" → OR filter
             if scan_contains(type_text, "and/or") {
@@ -5573,7 +5611,7 @@ fn try_parse_one_or_more_leave_graveyard(lower: &str) -> Option<(TriggerMode, Tr
                     })
                     .collect();
                 if filters.len() == parts.len() && filters.len() > 1 {
-                    Some(TargetFilter::Or { filters })
+                    TargetFilter::Or { filters }
                 } else {
                     continue;
                 }
@@ -5582,7 +5620,7 @@ fn try_parse_one_or_more_leave_graveyard(lower: &str) -> Option<(TriggerMode, Tr
                 if !remainder.trim().is_empty() {
                     continue;
                 }
-                Some(filter)
+                filter
             }
         } else {
             continue;
@@ -5591,7 +5629,7 @@ fn try_parse_one_or_more_leave_graveyard(lower: &str) -> Option<(TriggerMode, Tr
         let mut def = make_base();
         def.mode = TriggerMode::ChangesZoneAll;
         def.origin = Some(Zone::Graveyard);
-        def.valid_card = filter;
+        def.valid_card = Some(with_owner_scope(filter, ControllerRef::You));
         def.batched = true;
         // LTB-from-graveyard triggers need to fire from graveyard zone context
         def.trigger_zones = vec![Zone::Battlefield, Zone::Graveyard, Zone::Exile];
@@ -8421,6 +8459,24 @@ mod tests {
                 },
             }),
             offset: -1,
+        }
+    }
+
+    fn assert_owned_by_you(filter: &TargetFilter) {
+        match filter {
+            TargetFilter::Typed(typed) => assert!(
+                typed.properties.contains(&FilterProp::Owned {
+                    controller: ControllerRef::You,
+                }),
+                "expected Owned(You) property in {typed:?}"
+            ),
+            TargetFilter::Or { filters } => {
+                assert!(!filters.is_empty(), "expected non-empty Or filter");
+                for filter in filters {
+                    assert_owned_by_you(filter);
+                }
+            }
+            other => panic!("expected Typed or Or filter, got {other:?}"),
         }
     }
 
@@ -14153,7 +14209,7 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::ChangesZoneAll);
         assert_eq!(def.origin, Some(Zone::Graveyard));
         assert!(def.batched);
-        assert!(def.valid_card.is_some());
+        assert_owned_by_you(def.valid_card.as_ref().expect("valid_card"));
     }
 
     #[test]
@@ -14165,7 +14221,12 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::ChangesZoneAll);
         assert_eq!(def.origin, Some(Zone::Graveyard));
         assert!(def.batched);
-        assert_eq!(def.valid_card, None); // no type filter — "cards"
+        let filter = def.valid_card.as_ref().expect("valid_card");
+        assert_owned_by_you(filter);
+        assert!(
+            matches!(filter, TargetFilter::Typed(typed) if typed.type_filters == vec![TypeFilter::Card]),
+            "expected card filter for unqualified cards, got {filter:?}"
+        );
     }
 
     #[test]
@@ -14177,6 +14238,7 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::ChangesZoneAll);
         assert_eq!(def.origin, Some(Zone::Graveyard));
         assert!(def.batched);
+        assert_owned_by_you(def.valid_card.as_ref().expect("valid_card"));
         assert_eq!(def.constraint, Some(TriggerConstraint::OnlyDuringYourTurn));
     }
 
@@ -14216,7 +14278,9 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::ChangesZoneAll);
         assert_eq!(def.origin, Some(Zone::Graveyard));
         assert!(def.batched);
-        assert!(matches!(def.valid_card, Some(TargetFilter::Or { .. })));
+        let filter = def.valid_card.as_ref().expect("valid_card");
+        assert!(matches!(filter, TargetFilter::Or { .. }));
+        assert_owned_by_you(filter);
     }
 
     // ── Work Item 2: Discard Batch Triggers ───────────────────────

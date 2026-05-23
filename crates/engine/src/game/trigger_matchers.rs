@@ -4141,6 +4141,81 @@ mod tests {
     }
 
     #[test]
+    fn changes_zone_parsed_teval_trigger_scopes_to_own_graveyard() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(893),
+            PlayerId(0),
+            "Teval, the Balanced Scale".to_string(),
+            Zone::Battlefield,
+        );
+        let trigger = parse_trigger_line(
+            "Whenever one or more cards leave your graveyard, create a 2/2 black Zombie Druid creature token.",
+            "Teval, the Balanced Scale",
+        );
+
+        let own_card = ObjectId(100);
+        let own_card_leaves_graveyard = GameEvent::ZoneChanged {
+            object_id: own_card,
+            from: Some(Zone::Graveyard),
+            to: Zone::Battlefield,
+            record: Box::new(ZoneChangeRecord {
+                controller: PlayerId(0),
+                owner: PlayerId(0),
+                ..ZoneChangeRecord::test_minimal(own_card, Some(Zone::Graveyard), Zone::Battlefield)
+            }),
+        };
+        assert!(match_changes_zone(
+            &own_card_leaves_graveyard,
+            &trigger,
+            source,
+            &state
+        ));
+
+        let opponent_card = ObjectId(101);
+        let opponent_card_leaves_graveyard = GameEvent::ZoneChanged {
+            object_id: opponent_card,
+            from: Some(Zone::Graveyard),
+            to: Zone::Battlefield,
+            record: Box::new(ZoneChangeRecord {
+                controller: PlayerId(1),
+                owner: PlayerId(1),
+                ..ZoneChangeRecord::test_minimal(
+                    opponent_card,
+                    Some(Zone::Graveyard),
+                    Zone::Battlefield,
+                )
+            }),
+        };
+        assert!(
+            !match_changes_zone(&opponent_card_leaves_graveyard, &trigger, source, &state),
+            "Teval must not trigger for a card leaving an opponent's graveyard"
+        );
+
+        let opponent_creature = ObjectId(102);
+        let opponent_creature_dies = GameEvent::ZoneChanged {
+            object_id: opponent_creature,
+            from: Some(Zone::Battlefield),
+            to: Zone::Graveyard,
+            record: Box::new(ZoneChangeRecord {
+                core_types: vec![CoreType::Creature],
+                controller: PlayerId(1),
+                owner: PlayerId(1),
+                ..ZoneChangeRecord::test_minimal(
+                    opponent_creature,
+                    Some(Zone::Battlefield),
+                    Zone::Graveyard,
+                )
+            }),
+        };
+        assert!(
+            !match_changes_zone(&opponent_creature_dies, &trigger, source, &state),
+            "Teval must not trigger for an opponent's creature dying"
+        );
+    }
+
+    #[test]
     fn changes_zone_uses_event_snapshot_for_subtype_filters() {
         let mut state = setup();
         let source_id = create_object(
