@@ -1097,6 +1097,7 @@ const SUBTYPES: &[&str] = &[
     "Junk",
     "Map",
     "Powerstone",
+    "Spacecraft", // CR 205.3g: Spacecraft is an artifact subtype.
     "Treasure",
     "Vehicle",
     // ── Enchantment subtypes ──
@@ -1309,18 +1310,21 @@ pub fn parse_subtype(text: &str) -> Option<(String, usize)> {
 
 /// Infer the core type for a known subtype name.
 ///
-/// Artifact subtypes (Treasure, Food, Clue, Blood, Gold, Map, Equipment, Vehicle)
-/// map to `CoreType::Artifact`. Land subtypes (Forest, Plains, etc.) map to
-/// `CoreType::Land`. Enchantment subtypes (Aura, Saga, etc.) map to
-/// `CoreType::Enchantment`. Returns `None` for creature subtypes (the caller's
-/// existing default) or unknown subtypes.
+/// Artifact subtypes (Treasure, Food, Clue, Blood, Gold, Map, Equipment,
+/// Spacecraft, Vehicle) map to `CoreType::Artifact`. Land subtypes (Forest,
+/// Plains, etc.) map to `CoreType::Land`. Enchantment subtypes (Aura, Saga,
+/// etc.) map to `CoreType::Enchantment`. Returns `None` for creature subtypes
+/// (the caller's existing default) or unknown subtypes.
 ///
 /// Used by lord-pattern parsers to avoid defaulting all subtypes to Creature.
 pub fn infer_core_type_for_subtype(subtype: &str) -> Option<CoreType> {
     match subtype {
         // Artifact subtypes (CR 205.3g)
         "Treasure" | "Food" | "Clue" | "Blood" | "Gold" | "Map" | "Junk" | "Powerstone"
-        | "Equipment" | "Vehicle" | "Fortification" | "Contraption" => Some(CoreType::Artifact),
+        | "Equipment" | "Spacecraft" | "Vehicle" | "Fortification" | "Contraption" => {
+            // CR 205.3g: Spacecraft is an artifact subtype.
+            Some(CoreType::Artifact)
+        }
         // Land subtypes (CR 205.3i)
         "Forest" | "Plains" | "Island" | "Mountain" | "Swamp" | "Desert" | "Gate" | "Locus"
         | "Cave" | "Sphere" | "Mine" | "Tower" | "Power-Plant" => Some(CoreType::Land),
@@ -2562,6 +2566,14 @@ mod tests {
             parse_subtype("equipment"),
             Some(("Equipment".to_string(), 9))
         );
+        assert_eq!(
+            parse_subtype("Spacecraft"),
+            Some(("Spacecraft".to_string(), 10))
+        );
+        assert_eq!(
+            parse_subtype("spacecrafts"),
+            Some(("Spacecraft".to_string(), 11))
+        );
         assert_eq!(parse_subtype("forest"), Some(("Forest".to_string(), 6)));
         assert_eq!(parse_subtype("aura"), Some(("Aura".to_string(), 4)));
     }
@@ -2581,6 +2593,14 @@ mod tests {
             Some(("Goblin".to_string(), 6))
         );
         assert_eq!(parse_subtype("goblinking"), None);
+    }
+
+    #[test]
+    fn infer_core_type_for_spacecraft_subtype() {
+        assert_eq!(
+            infer_core_type_for_subtype("Spacecraft"),
+            Some(CoreType::Artifact)
+        );
     }
 
     #[test]
