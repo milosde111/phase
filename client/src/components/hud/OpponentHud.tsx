@@ -559,7 +559,17 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
       // tabs shrink to share one row; `max-w` caps a tab so 1-2 opponents don't
       // balloon. Chrome (padding/gap) is fixed because container queries can't
       // target the container element itself, only its descendants.
-      className={`@container relative flex min-w-0 max-w-[14rem] flex-1 items-center gap-1.5 rounded-lg border px-1.5 py-1 backdrop-blur-xl transition-all duration-200 ${borderClass} ${isEliminated || isPhasedOut ? "opacity-40 grayscale" : ""}`}
+      //
+      // The cap MUST stay >= the width the full breakdown reveal needs (the
+      // `@min-[19rem]` gate below), otherwise a capped tab reveals stats it has
+      // no room for and the life total spills over the HAND column. The stat
+      // labels are px-sized (don't scale with rem), so the full breakdown
+      // (avatar + name/life + HAND + creatures/lands/other) measures ~18rem
+      // (~290px at the default 16px root, verified in-browser). Cap at 20rem
+      // gives headroom for a 2-digit life and a designation badge; the reveal is
+      // gated at 19rem so a tab too narrow to fit the breakdown collapses to the
+      // HAND-only tier (tap to focus) instead of overlapping.
+      className={`@container relative flex min-w-0 max-w-[20rem] flex-1 items-center gap-1.5 rounded-lg border px-1.5 py-1 backdrop-blur-xl transition-all duration-200 ${borderClass} ${isEliminated || isPhasedOut ? "opacity-40 grayscale" : ""}`}
     >
       {isTheirTurn && !shouldReduceMotion && !commitReady && (
         <motion.div
@@ -608,7 +618,11 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
         avatarUrl={avatarUrl}
         seatColor={seatColor}
       />
-      <div className="flex min-w-0 flex-1 flex-col items-start leading-none">
+      {/* `overflow-hidden`: structural guard so the life total / designation
+          badges can never spill out of this flex-1 column onto the HAND stat
+          (the overlap bug). With the breakdown gated to only reveal when it
+          fits, this stays a safety net rather than clipping in normal play. */}
+      <div className="flex min-w-0 flex-1 flex-col items-start overflow-hidden leading-none">
         <span
           className="relative mb-0.5 flex w-full min-w-0 items-center gap-1 text-[9px] font-semibold uppercase tracking-[0.1em] @min-[11rem]:mb-1 @min-[11rem]:text-[10px] @min-[11rem]:tracking-[0.18em]"
           style={{ color: seatColor }}
@@ -643,7 +657,7 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
       <div className="hidden shrink-0 @min-[7rem]:flex">
         <Stat label={t("opponentHud.statHand")} value={handCount} color="text-slate-200" />
       </div>
-      <div className="hidden shrink-0 items-center gap-1.5 @min-[11rem]:flex">
+      <div className="hidden shrink-0 items-center gap-1.5 @min-[19rem]:flex">
         {counts.creatures > 0 && <Stat label={t("opponentHud.statCreatures")} value={counts.creatures} color="text-rose-200" />}
         {counts.lands > 0 && <Stat label={t("opponentHud.statLands")} value={counts.lands} color="text-emerald-200" />}
         {counts.other > 0 && <Stat label={t("opponentHud.statOther")} value={counts.other} color="text-cyan-200" />}
@@ -829,11 +843,15 @@ function PortaledPopover({ anchorEl, children }: { anchorEl: HTMLElement; childr
   );
 }
 
+// Labels are a single compact px size on purpose: a wider-label tier would
+// inflate the full breakdown past the tab cap (px labels don't scale with the
+// rem cap), re-triggering the life-over-HAND overlap. Width budget for the
+// reveal gate / cap above is sized against this size.
 function Stat({ label, value, color }: { label: string; value: number; color: string }) {
   return (
     <div className="flex flex-col items-start leading-none">
-      <span className="mb-0.5 text-[8px] font-medium uppercase tracking-[0.12em] text-white/40 @min-[12rem]:mb-1 @min-[12rem]:text-[9px] @min-[12rem]:tracking-[0.16em]">{label}</span>
-      <span className={`text-xs font-semibold tabular-nums @min-[12rem]:text-sm ${color}`}>{value}</span>
+      <span className="mb-0.5 text-[8px] font-medium uppercase tracking-[0.12em] text-white/40">{label}</span>
+      <span className={`text-xs font-semibold tabular-nums ${color}`}>{value}</span>
     </div>
   );
 }
