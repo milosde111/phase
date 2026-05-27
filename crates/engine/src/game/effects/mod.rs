@@ -5492,6 +5492,38 @@ mod tests {
     }
 
     #[test]
+    fn damage_chain_controller_rider_ignores_parent_targets() {
+        let mut state = GameState::new_two_player(42);
+        let rider = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Controller,
+                damage_source: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 4 },
+                target: TargetFilter::Any,
+                damage_source: None,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(rider);
+        let mut events = Vec::new();
+
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert_eq!(state.players[0].life, 18);
+        assert_eq!(state.players[1].life, 16);
+    }
+
+    #[test]
     fn counter_spell_damage_rider_hits_countered_spell_controller() {
         let mut state = GameState::new_two_player(42);
         let spell = create_object(
