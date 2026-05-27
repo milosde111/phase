@@ -7207,6 +7207,41 @@ mod tests {
         );
     }
 
+    #[test]
+    fn damage_target_filter_controller_only() {
+        let repl = damage_repl(DamageModification::Plus { value: 1 }).damage_target_filter(
+            DamageTargetFilter::Player {
+                player: DamageTargetPlayerScope::Controller,
+            },
+        );
+        let state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl]);
+        let registry = build_replacement_registry();
+
+        let proposed_self = ProposedEvent::Damage {
+            source_id: ObjectId(50),
+            target: TargetRef::Player(PlayerId(0)),
+            amount: 3,
+            is_combat: false,
+            applied: HashSet::new(),
+        };
+        assert!(
+            !find_applicable_replacements(&state, &proposed_self, &registry).is_empty(),
+            "controller player filter should match damage to the replacement source controller"
+        );
+
+        let proposed_opponent = ProposedEvent::Damage {
+            source_id: ObjectId(50),
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 3,
+            is_combat: false,
+            applied: HashSet::new(),
+        };
+        assert!(
+            find_applicable_replacements(&state, &proposed_opponent, &registry).is_empty(),
+            "controller player filter should not match damage to opponents"
+        );
+    }
+
     // --- BeginTurn / BeginPhase (CR 614.1b, CR 614.10) ---
 
     #[test]

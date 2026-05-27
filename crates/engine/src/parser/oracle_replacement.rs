@@ -3356,6 +3356,12 @@ fn damage_target_any_player() -> DamageTargetFilter {
     }
 }
 
+fn damage_target_controller() -> DamageTargetFilter {
+    DamageTargetFilter::Player {
+        player: DamageTargetPlayerScope::Controller,
+    }
+}
+
 fn damage_target_opponent() -> DamageTargetFilter {
     DamageTargetFilter::Player {
         player: DamageTargetPlayerScope::Opponent,
@@ -4363,7 +4369,7 @@ fn parse_damage_redirection_replacement(
         && nom_primitives::scan_contains(norm_lower, "is dealt to")
     {
         let target_filter = if nom_primitives::scan_contains(norm_lower, "would be dealt to you") {
-            Some(damage_target_any_player())
+            Some(damage_target_controller())
         } else {
             // "would be dealt to ~" or other targets — no specific filter
             None
@@ -4398,7 +4404,7 @@ fn parse_damage_redirection_replacement(
         return Some(
             ReplacementDefinition::new(ReplacementEvent::DamageDone)
                 .prevention_shield(PreventionAmount::All)
-                .damage_target_filter(damage_target_any_player())
+                .damage_target_filter(damage_target_controller())
                 .redirect_target(TargetFilter::SelfRef)
                 .description(original_text.to_string()),
         );
@@ -4597,7 +4603,7 @@ fn parse_damage_prevention_replacement(
     let damage_target_filter = if nom_primitives::scan_contains(working_lower, "dealt to you")
         || nom_primitives::scan_contains(working_lower, "deal to you")
     {
-        Some(damage_target_any_player())
+        Some(damage_target_controller())
     } else if nom_primitives::scan_contains(working_lower, "dealt to target creature")
         || nom_primitives::scan_contains(working_lower, "dealt to ~")
         || nom_primitives::scan_contains(working_lower, "dealt to and dealt by ~")
@@ -5752,7 +5758,7 @@ mod tests {
             }
         ));
         assert_eq!(def.combat_scope, Some(CombatDamageScope::CombatOnly));
-        assert_eq!(def.damage_target_filter, Some(damage_target_any_player()));
+        assert_eq!(def.damage_target_filter, Some(damage_target_controller()));
     }
 
     #[test]
@@ -5809,7 +5815,26 @@ mod tests {
             }
         ));
         assert!(def.combat_scope.is_none()); // all damage, not just combat
-        assert_eq!(def.damage_target_filter, Some(damage_target_any_player()));
+        assert_eq!(def.damage_target_filter, Some(damage_target_controller()));
+    }
+
+    #[test]
+    fn replacement_prevent_all_damage_to_you_without_duration() {
+        let def = parse_replacement_line(
+            "Prevent all damage that would be dealt to you.",
+            "Solitary Confinement",
+        )
+        .unwrap();
+
+        assert_eq!(def.event, ReplacementEvent::DamageDone);
+        assert!(matches!(
+            def.shield_kind,
+            ShieldKind::Prevention {
+                amount: PreventionAmount::All
+            }
+        ));
+        assert!(def.combat_scope.is_none());
+        assert_eq!(def.damage_target_filter, Some(damage_target_controller()));
     }
 
     #[test]
@@ -8865,7 +8890,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(def.event, ReplacementEvent::DamageDone);
-        assert_eq!(def.damage_target_filter, Some(damage_target_any_player()));
+        assert_eq!(def.damage_target_filter, Some(damage_target_controller()));
         // CR 615.1a: Redirect populates prevention shield + redirect target
         assert!(matches!(
             def.shield_kind,
@@ -8886,7 +8911,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(def.event, ReplacementEvent::DamageDone);
-        assert_eq!(def.damage_target_filter, Some(damage_target_any_player()));
+        assert_eq!(def.damage_target_filter, Some(damage_target_controller()));
         assert!(matches!(
             def.shield_kind,
             ShieldKind::Prevention {
