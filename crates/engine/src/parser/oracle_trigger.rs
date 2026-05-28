@@ -7868,6 +7868,24 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         return Some((TriggerMode::DamageReceived, def));
     }
 
+    // CR 701.38: "whenever players finish voting" fires once when all votes
+    // for a vote instruction have been cast and tallied.
+    // Cards: Model of Unity, Erestor of the Council, Grudge Keeper.
+    if all_consuming(preceded(
+        alt((tag::<_, _, OracleError<'_>>("whenever "), tag("when "))),
+        value(
+            (),
+            (tag("players"), space1, tag("finish"), space1, tag("voting")),
+        ),
+    ))
+    .parse(lower)
+    .is_ok()
+    {
+        let mut def = make_base();
+        def.mode = TriggerMode::Vote;
+        return Some((TriggerMode::Vote, def));
+    }
+
     // CR 701.30b-c: "whenever you clash" fires when the controller of the
     // trigger source is either player participating in a clash.
     // Cards: Entangling Trap, Rebellion of the Flamekin.
@@ -21926,6 +21944,29 @@ mod snapshot_tests {
         );
         assert_eq!(def.mode, TriggerMode::LosesGame);
         assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    }
+
+    /// CR 701.38: "Whenever players finish voting" triggers once per vote resolution.
+    /// Cards: Model of Unity, Erestor of the Council, Grudge Keeper.
+    #[test]
+    fn trigger_players_finish_voting_whenever() {
+        let def = parse_trigger_line(
+            "Whenever players finish voting, you and each opponent who voted for a choice you voted for may scry 2.",
+            "Model of Unity",
+        );
+        assert_eq!(def.mode, TriggerMode::Vote);
+        assert_eq!(def.valid_target, None);
+    }
+
+    /// CR 701.38: "When players finish voting" accepts the alternate trigger prefix.
+    #[test]
+    fn trigger_players_finish_voting_when_prefix() {
+        let def = parse_trigger_line(
+            "When players finish voting, each opponent who voted for a choice you didn't vote for loses 2 life.",
+            "Grudge Keeper",
+        );
+        assert_eq!(def.mode, TriggerMode::Vote);
+        assert_eq!(def.valid_target, None);
     }
 
     /// CR 701.30b-c: "Whenever you clash" scopes to the trigger controller as

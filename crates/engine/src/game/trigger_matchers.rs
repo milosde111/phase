@@ -97,6 +97,7 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         TriggerMode::RolledDie | TriggerMode::RolledDieOnce => match_rolled_die,
         TriggerMode::FlippedCoin => match_flipped_coin,
         TriggerMode::Clashed => match_clash,
+        TriggerMode::Vote => match_vote_resolved,
         TriggerMode::RingTemptsYou => match_ring_tempts_you,
         TriggerMode::DungeonCompleted => match_dungeon_completed,
         TriggerMode::RoomEntered => match_room_entered,
@@ -151,7 +152,6 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         | TriggerMode::ChaosEnsues
         | TriggerMode::Copied
         | TriggerMode::ConjureAll
-        | TriggerMode::Vote
         | TriggerMode::Abandoned
         | TriggerMode::ClaimPrize
         | TriggerMode::CrankContraption
@@ -318,6 +318,9 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     // CR 701.30: Clash trigger
     r.insert(TriggerMode::Clashed, match_clash);
 
+    // CR 701.38: Vote trigger
+    r.insert(TriggerMode::Vote, match_vote_resolved);
+
     // CR 701.54: Ring tempts you trigger
     r.insert(TriggerMode::RingTemptsYou, match_ring_tempts_you);
 
@@ -385,7 +388,6 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         TriggerMode::ChaosEnsues,
         TriggerMode::Copied,
         TriggerMode::ConjureAll,
-        TriggerMode::Vote,
         TriggerMode::Abandoned,
         TriggerMode::ClaimPrize,
         TriggerMode::CrankContraption,
@@ -2684,6 +2686,18 @@ pub(super) fn match_clash(
         }
         _ => false,
     }
+}
+
+/// CR 701.38: Match vote-resolved events.
+/// "Whenever players finish voting" fires once when all votes for a vote
+/// instruction have been cast and tallied.
+pub(super) fn match_vote_resolved(
+    event: &GameEvent,
+    _trigger: &TriggerDefinition,
+    _source_id: ObjectId,
+    _state: &GameState,
+) -> bool {
+    matches!(event, GameEvent::VoteResolved { .. })
 }
 
 /// CR 309.7: Match dungeon completion events.
@@ -8604,6 +8618,75 @@ mod tests {
             match_clash(&event2, &trigger, source, &state),
             "clash trigger must fire when controller is the opponent participant"
         );
+    }
+
+    /// CR 701.38: match_vote_resolved fires once on VoteResolved events.
+    #[test]
+    fn vote_resolved_trigger_fires_on_vote_resolved() {
+        let state = setup();
+        let trigger = make_trigger(TriggerMode::Vote);
+        let source = ObjectId(701);
+
+        let event = GameEvent::VoteResolved {
+            source_id: source,
+            tallies: vec![("friend".to_string(), 2), ("foe".to_string(), 1)],
+        };
+        assert!(
+            match_vote_resolved(&event, &trigger, source, &state),
+            "vote trigger must fire on VoteResolved"
+        );
+
+        let other = GameEvent::PlayerLost {
+            player_id: PlayerId(0),
+        };
+        assert!(
+            !match_vote_resolved(&other, &trigger, source, &state),
+            "vote trigger must not fire on unrelated events"
+        );
+    }
+
+    /// CR 603.2 + CR 701.38: parsed vote triggers must route through the
+    /// production trigger registry when a vote procedure finishes.
+    #[test]
+    fn parsed_vote_resolved_trigger_queues_from_process_triggers() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(701),
+            PlayerId(0),
+            "Model of Unity".to_string(),
+            Zone::Battlefield,
+        );
+        let trigger = parse_trigger_line(
+            "Whenever players finish voting, draw a card.",
+            "Model of Unity",
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .trigger_definitions
+            .push(trigger);
+
+        crate::game::triggers::process_triggers(
+            &mut state,
+            &[GameEvent::VoteResolved {
+                source_id: source,
+                tallies: vec![("unity".to_string(), 2)],
+            }],
+        );
+
+        assert_eq!(state.stack.len(), 1);
+        let entry = state.stack.front().expect("expected queued trigger");
+        assert_eq!(entry.source_id, source);
+        assert_eq!(entry.controller, PlayerId(0));
+        assert!(matches!(
+            entry.kind,
+            StackEntryKind::TriggeredAbility {
+                trigger_event: Some(GameEvent::VoteResolved { .. }),
+                ..
+            }
+        ));
     }
 
     /// Issue #311 end-to-end: parse the Undead Alchemist trigger line and
