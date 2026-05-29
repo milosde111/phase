@@ -100,6 +100,7 @@ mod unstoppable_slasher_half_life;
 mod ureni_attack_trigger;
 mod urzas_saga_chapter_two;
 mod urzas_tower_conditional_mana;
+mod vigor_regression;
 mod virulent_emissary_trigger;
 mod volatile_fault_that_player_search;
 mod wedding_ring_etb_token_copy;
