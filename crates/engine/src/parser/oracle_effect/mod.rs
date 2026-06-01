@@ -39810,6 +39810,11 @@ mod snapshot_tests {
                     modification,
                     ContinuousModification::AddSubtype { subtype } if subtype == "Vampire"
                 )
+            }) && !static_def.modifications.iter().any(|modification| {
+                matches!(
+                    modification,
+                    ContinuousModification::RemoveAllSubtypes { .. }
+                )
             })
         }));
     }
