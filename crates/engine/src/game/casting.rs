@@ -17842,6 +17842,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
         ));
         spell.casting_options.push(
@@ -22030,6 +22031,7 @@ mod tests {
                         enters_attacking: false,
                         up_to: false,
                         enter_with_counters: vec![],
+                        face_down_profile: None,
                     },
                 )
                 .sub_ability(
@@ -22046,6 +22048,7 @@ mod tests {
                             enters_attacking: false,
                             up_to: false,
                             enter_with_counters: vec![],
+                            face_down_profile: None,
                         },
                     )
                     .condition(AbilityCondition::AdditionalCostPaidInstead),
@@ -22788,6 +22791,7 @@ mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    face_down_profile: None,
                 },
             ));
             obj.modal = Some(crate::types::ability::ModalChoice {
@@ -22951,6 +22955,7 @@ mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    face_down_profile: None,
                 },
             ));
             // Mode 1: return target creature with mana value X or less to its owner's hand.
@@ -22976,6 +22981,7 @@ mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    face_down_profile: None,
                 },
             ));
             obj.modal = Some(crate::types::ability::ModalChoice {
@@ -23358,6 +23364,7 @@ mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    face_down_profile: None,
                 },
             );
             let mode1 = AbilityDefinition::new(
@@ -23373,6 +23380,7 @@ mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    face_down_profile: None,
                 },
             );
             Arc::make_mut(&mut obj.abilities).push(
@@ -31466,6 +31474,7 @@ mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    face_down_profile: None,
                 },
             );
             put_in_hand_def.sub_ability = Some(Box::new(shuffle_def));

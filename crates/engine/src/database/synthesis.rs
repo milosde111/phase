@@ -470,6 +470,7 @@ pub fn synthesize_craft(face: &mut CardFace) {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: Vec::new(),
+                    face_down_profile: None,
                 },
             )
             .cost(AbilityCost::Composite {
@@ -1493,6 +1494,7 @@ pub fn synthesize_cycling(face: &mut CardFace) {
                         enters_attacking: false,
                         up_to: false,
                         enter_with_counters: vec![],
+                        face_down_profile: None,
                     },
                 );
                 put_in_hand_def.sub_ability = Some(Box::new(shuffle_def));
@@ -1850,6 +1852,7 @@ pub fn synthesize_madness_intrinsics(face: &mut CardFace) {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
         )));
         face.replacements.push(replacement);
@@ -3649,6 +3652,7 @@ fn build_dies_return_with_counter_trigger(
         enters_attacking: false,
         up_to: false,
         enter_with_counters: vec![(counter_type.clone(), QuantityExpr::Fixed { value: 1 })],
+        face_down_profile: None,
     };
 
     let execute = AbilityDefinition::new(AbilityKind::Spell, return_effect).description(format!(
@@ -5397,6 +5401,7 @@ pub fn synthesize_partner_with(face: &mut CardFace) {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            face_down_profile: None,
         },
     )
     .sub_ability(shuffle);
@@ -5520,6 +5525,7 @@ pub fn synthesize_siege_intrinsics(face: &mut CardFace) {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
         )
         .sub_ability(cast_sub);
