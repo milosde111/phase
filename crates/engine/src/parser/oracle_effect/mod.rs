@@ -2978,7 +2978,11 @@ fn try_parse_have_causative(
     // second player" must reach the anaphor-target arm, not collapse to
     // `target: Player`).
     let after_have = nom_on_lower(tp.original, tp.lower, |input| {
-        value((), alt((tag("have it "), tag("have ~ ")))).parse(input)
+        value(
+            (),
+            alt((tag("have it "), tag("have ~ "), tag("have this artifact "))),
+        )
+        .parse(input)
     });
     if let Some((_, rest_orig)) = after_have {
         let rest_lower = &tp.lower[tp.lower.len() - rest_orig.len()..];
@@ -3008,6 +3012,16 @@ fn try_parse_have_causative(
                     return Some(parsed_clause(Effect::DealDamage {
                         amount,
                         target: TargetFilter::Player,
+                        damage_source: None,
+                    }));
+                }
+                // CR 608.2d: "have this artifact deal 1 damage to it" (Requiem
+                // Monolith) — optional self-damage the targeted creature's
+                // controller may cause the source artifact to deal.
+                if after_damage.trim_end_matches('.').trim() == "it" {
+                    return Some(parsed_clause(Effect::DealDamage {
+                        amount,
+                        target: TargetFilter::ParentTarget,
                         damage_source: None,
                     }));
                 }
