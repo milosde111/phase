@@ -154,6 +154,7 @@ pub enum KeywordKind {
     Protection,
     Kicker,
     Cycling,
+    Typecycling,
     Flashback,
     Retrace,
     Ward,
@@ -1043,6 +1044,7 @@ impl Keyword {
             Keyword::Protection(_) => KeywordKind::Protection,
             Keyword::Kicker(_) => KeywordKind::Kicker,
             Keyword::Cycling(_) => KeywordKind::Cycling,
+            Keyword::Typecycling { .. } => KeywordKind::Typecycling,
             Keyword::Flashback(_) => KeywordKind::Flashback,
             Keyword::Retrace => KeywordKind::Retrace,
             Keyword::Ward(_) => KeywordKind::Ward,
@@ -1174,7 +1176,6 @@ impl Keyword {
             | Keyword::Surge(_)
             | Keyword::Totem
             | Keyword::Toxic(_)
-            | Keyword::Typecycling { .. }
             | Keyword::WebSlinging(_) => KeywordKind::Unknown,
         }
     }
