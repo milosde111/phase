@@ -193,13 +193,17 @@ body {
   -webkit-touch-callout: default;
 }
 
-/* Number input steppers — replace default light-grey Chrome/Edge spin buttons with
-   hairline-dark chrome consistent with .thin-scrollbar and form fields.
+/* Number input steppers — deliberately global (unlike class-scoped .thin-scrollbar)
+   so every number field app-wide gets consistent chrome without per-component classes.
+   Replaces default light-grey Chrome/Edge spin buttons with hairline-dark styling.
    Custom hover-reveal steppers are pointer-fine only: the 16px control is below
    the 44pt touch-target rule and :hover is unreliable on coarse pointers. Touch
-   devices keep native steppers tinted via html { color-scheme: dark }. */
+   devices keep native steppers tinted via html { color-scheme: dark }.
+   Firefox: appearance:textfield removes native spinners (no ::-webkit-* equivalent);
+   keyboard arrows and direct typing still work — intentional tradeoff. */
 input[type="number"] {
   -moz-appearance: textfield;
+  appearance: textfield;
 }
 
 @media (pointer: fine) {
