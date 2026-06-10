@@ -3,6 +3,10 @@ import { createPortal } from "react-dom";
 
 const MENU_GAP_PX = 4;
 const MENU_MAX_HEIGHT_PX = 280;
+// Cap how far the widest item label can grow the closed trigger — a single
+// long deck name must not stretch the toolbar (items truncate with a title
+// tooltip beyond this).
+const TRIGGER_MAX_WIDTH_PX = 320;
 
 export interface MenuSelectItem {
   value: string;
@@ -85,7 +89,7 @@ export function MenuSelect({
     }
 
     // px-3 padding + chevron + gap between label and icon.
-    setMinWidthPx(contentWidth + 48);
+    setMinWidthPx(Math.min(contentWidth + 48, TRIGGER_MAX_WIDTH_PX));
   }, [label, itemsKey]);
 
   const updatePosition = useCallback(() => {
@@ -110,6 +114,9 @@ export function MenuSelect({
   useLayoutEffect(() => {
     if (!open) return;
     updatePosition();
+    // APG listbox pattern: move focus into the menu so the keyboard path
+    // (Arrow keys + Enter) works like the native select this replaces.
+    menuRef.current?.querySelector<HTMLButtonElement>('[role="option"]')?.focus();
   }, [open, updatePosition]);
 
   useEffect(() => {
@@ -121,7 +128,23 @@ export function MenuSelect({
       setOpen(false);
     };
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpen(false);
+      if (event.key === "Escape") {
+        setOpen(false);
+        triggerRef.current?.focus();
+        return;
+      }
+      if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+      const options = menuRef.current?.querySelectorAll<HTMLButtonElement>('[role="option"]');
+      if (!options || options.length === 0) return;
+      event.preventDefault();
+      const current = Array.prototype.indexOf.call(options, document.activeElement);
+      const next =
+        current < 0
+          ? event.key === "ArrowDown"
+            ? 0
+            : options.length - 1
+          : (current + (event.key === "ArrowDown" ? 1 : -1) + options.length) % options.length;
+      options[next].focus();
     };
     const handleScroll = (event: Event) => {
       const target = event.target as Node | null;
