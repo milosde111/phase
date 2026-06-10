@@ -55,21 +55,35 @@ export function MenuSelect({
 }: MenuSelectProps) {
   const listboxId = useId();
   const [open, setOpen] = useState(false);
+  const [minWidthPx, setMinWidthPx] = useState<number | undefined>(undefined);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  const measureRef = useRef<HTMLSpanElement>(null);
   const [menuStyle, setMenuStyle] = useState<{
     top: number;
     left: number;
     width: number;
-    minWidth: number;
     maxHeight: number;
   }>({
     top: 0,
     left: 0,
     width: 0,
-    minWidth: 0,
     maxHeight: MENU_MAX_HEIGHT_PX,
   });
+
+  useLayoutEffect(() => {
+    const measure = measureRef.current;
+    if (!measure) return;
+
+    let contentWidth = 0;
+    for (const sample of [label, ...items.map((item) => item.label)]) {
+      measure.textContent = sample;
+      contentWidth = Math.max(contentWidth, measure.offsetWidth);
+    }
+
+    // px-3 padding + chevron + gap between label and icon.
+    setMinWidthPx(contentWidth + 48);
+  }, [label, items]);
 
   const updatePosition = useCallback(() => {
     const trigger = triggerRef.current;
@@ -82,25 +96,9 @@ export function MenuSelect({
     const maxHeight = Math.min(MENU_MAX_HEIGHT_PX, openUp ? spaceAbove : spaceBelow);
     const renderedHeight = Math.min(menuRef.current?.offsetHeight ?? maxHeight, maxHeight);
 
-    const viewportMargin = 8;
-    const naturalWidth = Math.max(rect.width, menuRef.current?.scrollWidth ?? rect.width);
-    const spaceRight = window.innerWidth - rect.left - viewportMargin;
-    const spaceLeft = rect.right - viewportMargin;
-
-    let width = Math.min(naturalWidth, window.innerWidth - viewportMargin * 2);
-    let left = rect.left;
-
-    if (width > spaceRight && spaceLeft >= width) {
-      left = rect.right - width;
-    } else {
-      width = Math.min(width, spaceRight);
-      left = Math.max(viewportMargin, Math.min(left, window.innerWidth - width - viewportMargin));
-    }
-
     setMenuStyle({
-      left,
-      width,
-      minWidth: rect.width,
+      left: rect.left,
+      width: rect.width,
       maxHeight: Math.max(maxHeight, 0),
       top: openUp ? rect.top - renderedHeight - MENU_GAP_PX : rect.bottom + MENU_GAP_PX,
     });
@@ -112,7 +110,7 @@ export function MenuSelect({
     // Re-measure once the portaled menu has layout for open-up placement.
     const frame = requestAnimationFrame(updatePosition);
     return () => cancelAnimationFrame(frame);
-  }, [open, items.length, updatePosition]);
+  }, [open, items.length, minWidthPx, updatePosition]);
 
   useEffect(() => {
     if (!open) return;
@@ -160,7 +158,15 @@ export function MenuSelect({
     .join(" ");
 
   return (
-    <div className={`relative ${wrapperClassName}`.trim()}>
+    <div
+      className={`relative ${wrapperClassName}`.trim()}
+      style={minWidthPx ? { minWidth: minWidthPx } : undefined}
+    >
+      <span
+        ref={measureRef}
+        aria-hidden="true"
+        className="pointer-events-none invisible absolute text-sm whitespace-nowrap"
+      />
       <button
         ref={triggerRef}
         type="button"
@@ -186,13 +192,12 @@ export function MenuSelect({
             id={listboxId}
             role="listbox"
             aria-label={label}
-            className="fixed z-[120] w-max overflow-y-auto overscroll-contain rounded-xl border border-white/10 bg-[#0a0f1b]/98 py-1 shadow-xl backdrop-blur-md thin-scrollbar"
+            className="fixed z-[120] flex flex-col overflow-x-hidden overflow-y-auto overscroll-contain rounded-xl border border-white/10 bg-[#0a0f1b]/98 py-1 shadow-xl backdrop-blur-md thin-scrollbar"
             onWheel={(event) => event.stopPropagation()}
             style={{
               top: menuStyle.top,
               left: menuStyle.left,
-              width: menuStyle.width > 0 ? menuStyle.width : undefined,
-              minWidth: menuStyle.minWidth,
+              width: menuStyle.width,
               maxHeight: menuStyle.maxHeight,
             }}
           >
@@ -206,8 +211,9 @@ export function MenuSelect({
                   setOpen(false);
                 }}
                 className="flex w-full min-w-0 items-center px-3 py-2 text-left text-sm text-slate-200 transition-colors hover:bg-white/10 focus-visible:bg-white/10 focus-visible:outline-none"
+                title={item.label}
               >
-                <span className="min-w-0 whitespace-nowrap">{item.label}</span>
+                <span className="min-w-0 truncate">{item.label}</span>
               </button>
             ))}
           </div>,

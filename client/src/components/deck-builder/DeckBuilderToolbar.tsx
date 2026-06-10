@@ -124,7 +124,7 @@ export function DeckBuilderToolbar({
             label={t("toolbar.loadDeck")}
             items={savedDecks.map((name) => ({ value: name, label: name }))}
             onSelect={onLoad}
-            wrapperClassName="max-w-[8rem] shrink-0 sm:max-w-none"
+            wrapperClassName="shrink-0"
           />
         )}
       </div>
