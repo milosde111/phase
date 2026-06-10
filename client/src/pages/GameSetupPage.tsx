@@ -539,7 +539,7 @@ export function GameSetupPage() {
           subtitle={t("gameSetup.formatPicker.subtitle")}
           onClose={() => setFormatPickerOpen(false)}
           maxWidthClassName="max-w-3xl"
-          bodyClassName="overflow-y-auto px-2 py-4 lg:px-6 lg:py-6"
+          bodyClassName="overflow-y-auto px-4 py-4 lg:px-6 lg:py-6"
         >
           <FormatPicker
             onFormatSelect={(format) => {
