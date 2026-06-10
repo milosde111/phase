@@ -59,13 +59,16 @@ export function MenuSelect({
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const measureRef = useRef<HTMLSpanElement>(null);
+  const itemsKey = items.map((item) => item.label).join("\0");
   const [menuStyle, setMenuStyle] = useState<{
-    top: number;
+    top: number | "auto";
+    bottom: number | "auto";
     left: number;
     width: number;
     maxHeight: number;
   }>({
     top: 0,
+    bottom: "auto",
     left: 0,
     width: 0,
     maxHeight: MENU_MAX_HEIGHT_PX,
@@ -83,7 +86,7 @@ export function MenuSelect({
 
     // px-3 padding + chevron + gap between label and icon.
     setMinWidthPx(contentWidth + 48);
-  }, [label, items]);
+  }, [label, itemsKey]);
 
   const updatePosition = useCallback(() => {
     const trigger = triggerRef.current;
@@ -94,23 +97,20 @@ export function MenuSelect({
     const spaceAbove = Math.max(0, rect.top - MENU_GAP_PX);
     const openUp = spaceBelow < MENU_MAX_HEIGHT_PX && spaceAbove > spaceBelow;
     const maxHeight = Math.min(MENU_MAX_HEIGHT_PX, openUp ? spaceAbove : spaceBelow);
-    const renderedHeight = Math.min(menuRef.current?.offsetHeight ?? maxHeight, maxHeight);
 
     setMenuStyle({
       left: rect.left,
       width: rect.width,
       maxHeight: Math.max(maxHeight, 0),
-      top: openUp ? rect.top - renderedHeight - MENU_GAP_PX : rect.bottom + MENU_GAP_PX,
+      top: openUp ? "auto" : rect.bottom + MENU_GAP_PX,
+      bottom: openUp ? window.innerHeight - rect.top + MENU_GAP_PX : "auto",
     });
   }, []);
 
   useLayoutEffect(() => {
     if (!open) return;
     updatePosition();
-    // Re-measure once the portaled menu has layout for open-up placement.
-    const frame = requestAnimationFrame(updatePosition);
-    return () => cancelAnimationFrame(frame);
-  }, [open, items.length, minWidthPx, updatePosition]);
+  }, [open, updatePosition]);
 
   useEffect(() => {
     if (!open) return;
@@ -196,6 +196,7 @@ export function MenuSelect({
             onWheel={(event) => event.stopPropagation()}
             style={{
               top: menuStyle.top,
+              bottom: menuStyle.bottom,
               left: menuStyle.left,
               width: menuStyle.width,
               maxHeight: menuStyle.maxHeight,
