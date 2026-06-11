@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 const MENU_GAP_PX = 4;
@@ -130,8 +130,7 @@ export function MenuSelect({
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const measureRef = useRef<HTMLSpanElement>(null);
-  const allItems = flattenMenuItems(items, groups);
-  const itemsKey = allItems.map((item) => item.label).join("\0");
+  const allItems = useMemo(() => flattenMenuItems(items, groups), [items, groups]);
   const [menuStyle, setMenuStyle] = useState<{
     top: number | "auto";
     bottom: number | "auto";
@@ -158,7 +157,7 @@ export function MenuSelect({
 
     // px-3 padding + chevron + gap between label and icon.
     setMinWidthPx(Math.min(contentWidth + 48, TRIGGER_MAX_WIDTH_PX));
-  }, [label, itemsKey]);
+  }, [label, allItems]);
 
   const updatePosition = useCallback(() => {
     if (mobileSheet) return;
