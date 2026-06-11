@@ -19,7 +19,6 @@ function useMobileSheetLayout(): boolean {
   useEffect(() => {
     const mediaQuery = window.matchMedia(MOBILE_SHEET_MEDIA_QUERY);
     const handleChange = () => setMobileSheet(mediaQuery.matches);
-    handleChange();
     mediaQuery.addEventListener("change", handleChange);
     return () => mediaQuery.removeEventListener("change", handleChange);
   }, []);
