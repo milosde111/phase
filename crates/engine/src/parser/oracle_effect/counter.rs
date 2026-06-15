@@ -1,7 +1,7 @@
-use crate::parser::oracle_nom::error::OracleError;
+use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
-use nom::bytes::complete::{tag, take_until};
-use nom::character::complete::{multispace0, space1};
+use nom::bytes::complete::{tag, take_till, take_until};
+use nom::character::complete::space1;
 use nom::combinator::{eof, peek, value};
 use nom::sequence::terminated;
 use nom::Parser;
@@ -16,9 +16,9 @@ use crate::types::mana::ManaColor;
 use super::super::oracle_nom::bridge::nom_on_lower;
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
-use super::super::oracle_quantity::parse_for_each_clause_expr;
 use super::super::oracle_target::{parse_target, parse_target_with_ctx, parse_type_phrase};
 use super::super::oracle_util::{parse_count_expr, parse_number};
+use super::lower::parse_for_each_multiplier_prefix;
 use super::{resolve_it_pronoun, ParseContext};
 #[cfg(debug_assertions)]
 use crate::parser::oracle_ir::ast::assert_no_compound_remainder;
@@ -328,7 +328,7 @@ pub(super) fn try_parse_put_counter<'a>(
             //   eager: "a number of counters equal to X ..." (counter type absent
             //          or implicit — rare in practice)
             //   trailing: "a number of {type} counters equal to X ..." (Gruff class)
-            match nom_quantity::parse_equal_to(after_phrase) {
+            match parse_counter_equal_to(after_phrase) {
                 Ok((rest, qty)) => {
                     let rest = rest.strip_prefix(' ').unwrap_or(rest);
                     (qty, rest, false, false)
@@ -372,7 +372,7 @@ pub(super) fn try_parse_put_counter<'a>(
     //   post-target: "a number of +1/+1 counters on ~ equal to that creature's power" (Vincent Valentine)
     // Try consuming "equal to" here; if absent, defer to post-target resolution.
     let (mut count_expr, after_counter_word, dynamic_deferred) = if dynamic_pending {
-        match nom_quantity::parse_equal_to(after_counter_word) {
+        match parse_counter_equal_to(after_counter_word) {
             Ok((after_clause, qty)) => {
                 // allow-noncombinator: whitespace trim after nom combinator result, not dispatch
                 let after_clause = after_clause.strip_prefix(' ').unwrap_or(after_clause);
@@ -399,7 +399,7 @@ pub(super) fn try_parse_put_counter<'a>(
     // the clause wasn't found before "on {target}" and must appear here.
     if dynamic_deferred {
         let trimmed = remainder.trim_start();
-        match nom_quantity::parse_equal_to(trimmed) {
+        match parse_counter_equal_to(trimmed) {
             Ok((after_clause, qty)) => {
                 count_expr = if rebind_deferred_to_placement_object {
                     rebind_post_target_counter_quantity(qty, trimmed, &target)
@@ -460,15 +460,63 @@ pub(super) fn try_parse_put_counter<'a>(
 }
 
 fn parse_counter_for_each_suffix(remainder: &str) -> Option<(QuantityExpr, &str)> {
-    let remainder_lower = remainder.to_lowercase();
-    let ((), for_each_clause) = nom_on_lower(remainder, &remainder_lower, |input| {
-        let (rest, _) = multispace0.parse(input)?;
-        let (rest, _) = tag::<_, _, OracleError<'_>>("for each ").parse(rest)?;
-        Ok((rest, ()))
-    })?;
-    let clause_lower = for_each_clause.to_lowercase();
-    let count = parse_for_each_clause_expr(clause_lower.trim())?;
+    // Delegate to the shared anchored "attach trailing for-each multiplier"
+    // authority (CR 107.1 integer count templating) in oracle_effect::lower.
+    // The multiplier consumes the entire tail; preserve the original contract
+    // of returning an empty post-suffix remainder.
+    let count = parse_for_each_multiplier_prefix(remainder)?;
     Some((count, ""))
+}
+
+/// CR 122.1 + CR 706.2: Parse a dynamic counter-count "equal to {qty}" clause,
+/// covering both the typed-quantity grammar and the event-context back-references
+/// that grammar does not reach on its own.
+///
+/// The nom `parse_equal_to` combinator handles every typed `QuantityRef`
+/// (object counts, power/toughness, life refs, …). It does NOT recognize the
+/// die-roll / coin-flip back-reference "the result" (CR 706.2) — that phrase is
+/// owned by `parse_event_context_quantity`, the single authority for anaphoric
+/// event-context amounts ("that much", "that many", "the result"). The
+/// equivalent token-creation and life-gain paths already fall back to
+/// `parse_event_context_quantity` after their primary quantity parse
+/// (`token.rs` count-expression resolution, `imperative.rs::parse_life_equal_quantity`);
+/// the counter path is the remaining gap, so it gets the same fallback here
+/// rather than leaking "the result" into the shared `parse_quantity_ref` leaf
+/// (which would break the `parse_cda_quantity` "returns None for the bare
+/// die-result phrase" invariant the where-X binding relies on).
+///
+/// Inputs reaching here always begin with the literal "equal to " (the three
+/// call sites guard on it). The event-context fallback isolates the post-"equal
+/// to " phrase up to the first clause boundary so a trailing clause (", then …")
+/// stays in the returned remainder, mirroring nom's consume-and-remainder
+/// contract.
+fn parse_counter_equal_to(
+    input: &str,
+) -> crate::parser::oracle_nom::error::OracleResult<'_, QuantityExpr> {
+    // Typed-quantity grammar first; it owns proper remainder handling.
+    if let Ok((rest, qty)) = nom_quantity::parse_equal_to(input) {
+        return Ok((rest, qty));
+    }
+
+    // CR 706.2: event-context back-reference fallback ("equal to the result").
+    let (after_equal, _) = tag("equal to ").parse(input)?;
+    // Isolate the quantity phrase from any trailing clause via a nom combinator
+    // (take everything up to the first clause separator). Event-context phrases
+    // are short and clause-final in the counter templates that reach this
+    // fallback; the tail after the separator is preserved as the remainder so a
+    // following clause (", then …") is never swallowed.
+    let (_, phrase) =
+        take_till::<_, _, OracleError<'_>>(|c| c == ',' || c == '.').parse(after_equal)?;
+    let phrase = phrase.trim_end();
+    match crate::parser::oracle_quantity::parse_event_context_quantity(phrase) {
+        // Remainder starts immediately after the consumed phrase (before any
+        // trailing whitespace), preserving the original clause boundary.
+        Some(qty) => Ok((&after_equal[phrase.len()..], qty)),
+        None => Err(nom::Err::Error(OracleError::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        ))),
+    }
 }
 
 /// CR 122.1: Consume the "a number of " prefix used in dynamic counter-count
@@ -570,6 +618,35 @@ fn rebind_counter_quantity_scope(count: QuantityExpr, scope: ObjectScope) -> Qua
     }
 }
 
+/// CR 608.2k + CR 122.1: Anaphoric reference to "the just-referenced counters".
+///
+/// Recognizes the bare-pronoun / deictic phrases that refer back to a set of
+/// counters established earlier in the same ability (a cost, or a trigger's
+/// intervening-if condition like "if it has six or more level counters on it"):
+///   - deictic: "those counters" / "its counters" / "this {type}'s counters"
+///   - bare object pronoun: "them" / "all of them" (CR 608.2k pronoun anaphor)
+///
+/// This is the single authority for the remove-counter anaphor surface — both
+/// `try_parse_remove_counter` (to build the effect) and the imperative dispatch
+/// gate (to route the clause here despite the absence of the literal word
+/// "counter") delegate to it, so the phrase list never drifts between the two.
+pub(super) fn parse_counter_anaphor(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        alt((
+            tag("all of them"),
+            tag("those counters"),
+            tag("its counters"),
+            tag("this creature's counters"),
+            tag("this artifact's counters"),
+            tag("this enchantment's counters"),
+            tag("this permanent's counters"),
+            tag("them"),
+        )),
+    )
+    .parse(input)
+}
+
 pub(super) fn try_parse_remove_counter(lower: &str, ctx: &mut ParseContext) -> Option<Effect> {
     // "remove N {type} counter(s) from {target}" or "remove all counters from {target}"
     // CR 122.1: Counter type is optional — "remove all counters" removes every type.
@@ -580,49 +657,47 @@ pub(super) fn try_parse_remove_counter(lower: &str, ctx: &mut ParseContext) -> O
     // clause refers to counters on the ability source (the antecedent
     // established earlier in the same ability's cost or trigger condition,
     // e.g., "if there are four or more charge counters on it, remove those
-    // counters and transform it"). Covers the full anaphor class:
-    //   - "those counters" / "its counters" / "this {creature,artifact,...}'s counters"
-    //   - bare object pronoun "them" / "all of them" (CR 608.2k pronoun anaphor)
-    // Sentinel count -1 with empty counter_type tells the runtime resolver to
-    // strip every counter on the source. Mirrors `try_parse_move_counters`'
-    // anaphor handling.
-    if let Some(((), _)) = nom_on_lower(after_remove, after_remove, |i| {
-        value(
-            (),
-            alt((
-                tag("all of them"),
-                tag("those counters"),
-                tag("its counters"),
-                tag("this creature's counters"),
-                tag("this artifact's counters"),
-                tag("this enchantment's counters"),
-                tag("this permanent's counters"),
-                tag("them"),
-            )),
-        )
-        .parse(i)
-    }) {
+    // counters and transform it"). Sentinel count -1 with empty counter_type
+    // tells the runtime resolver to strip every counter on the source. Mirrors
+    // `try_parse_move_counters`' anaphor handling. The anaphor surface is owned
+    // by `parse_counter_anaphor` so the dispatch gate and this builder agree.
+    if nom_on_lower(after_remove, after_remove, parse_counter_anaphor).is_some() {
         return Some(Effect::RemoveCounter {
             counter_type: None,
-            count: -1,
+            count: QuantityExpr::Fixed { value: -1 },
             target: TargetFilter::SelfRef,
         });
     }
 
     // CR 122.1: "remove all" uses sentinel count -1, resolved to actual count at runtime.
     // Also handle "up to N" prefix (player may remove fewer).
+    // CR 615.5 + CR 608.2h: "that many" / "that much" binds the prevented-damage
+    // amount of an enclosing prevention replacement (Protean Hydra class:
+    // "prevent that damage and remove that many +1/+1 counters from it"). The
+    // amount is the info the rider reads from the prevented event at resolution.
+    // Resolves to `EventContextAmount`, matching the `PutCounter` "that many"
+    // path used by the Vigor / Phyrexian Hydra cohort.
     let (count, rest) = if let Some(((), rest)) = nom_on_lower(after_remove, after_remove, |i| {
+        value((), alt((tag("that many "), tag("that much ")))).parse(i)
+    }) {
+        (
+            QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            },
+            rest.trim_start(),
+        )
+    } else if let Some(((), rest)) = nom_on_lower(after_remove, after_remove, |i| {
         value((), tag("all ")).parse(i)
     }) {
-        (-1i32, rest.trim_start())
+        (QuantityExpr::Fixed { value: -1 }, rest.trim_start())
     } else if let Some(((), rest)) = nom_on_lower(after_remove, after_remove, |i| {
         value((), tag("up to ")).parse(i)
     }) {
         let (n, r) = parse_number(rest.trim())?;
-        (n as i32, r)
+        (QuantityExpr::Fixed { value: n as i32 }, r)
     } else {
         let (n, r) = parse_number(after_remove)?;
-        (n as i32, r)
+        (QuantityExpr::Fixed { value: n as i32 }, r)
     };
 
     // Try matching "counter(s)" directly (untyped: "remove all counters from ...").
@@ -744,18 +819,27 @@ pub(super) fn try_parse_move_counters<'a>(
 ) -> Option<(Effect, &'a str)> {
     let ((), after_put) = nom_on_lower(lower, lower, |i| value((), tag("put ")).parse(i))?;
     let after_put = after_put.trim();
-    // Detect "its counters" / "this creature's counters" / "those counters"
-    let ((), after_possessive) = nom_on_lower(after_put, after_put, |i| {
-        value(
-            (),
-            alt((
-                tag("its counter"),
-                tag("this creature's counter"),
-                tag("those counter"),
-            )),
-        )
-        .parse(i)
-    })?;
+    // Detect "its counters" / "~'s counters" / "this creature's counters" /
+    // "those counters".
+    let (source, after_possessive) = if let Some(((), rest)) =
+        nom_on_lower(after_put, after_put, |i| {
+            value((), tag("~'s counter")).parse(i)
+        }) {
+        (TargetFilter::SelfRef, rest)
+    } else {
+        let ((), rest) = nom_on_lower(after_put, after_put, |i| {
+            value(
+                (),
+                alt((
+                    tag("its counter"),
+                    tag("this creature's counter"),
+                    tag("those counter"),
+                )),
+            )
+            .parse(i)
+        })?;
+        (resolve_it_pronoun(ctx), rest)
+    };
     // Skip past optional "s" (counter vs counters) then expect " on "
     let after_counters = nom_on_lower(after_possessive, after_possessive, |i| {
         value((), tag("s")).parse(i)
@@ -777,7 +861,7 @@ pub(super) fn try_parse_move_counters<'a>(
             // object had are placed on the destination — read from the leaving
             // object's last-known information (CR 400.7), so the source must be
             // the triggering object, not the ability source.
-            source: resolve_it_pronoun(ctx),
+            source,
             counter_type: None,
             count: None,
             mode: CounterTransferMode::Put,
@@ -1136,7 +1220,11 @@ mod tests {
             panic!("expected RemoveCounter, got {result:?}");
         };
         assert_eq!(counter_type, None, "untyped should be None");
-        assert_eq!(count, -1, "all = sentinel -1");
+        assert_eq!(
+            count,
+            QuantityExpr::Fixed { value: -1 },
+            "all = sentinel -1"
+        );
         assert!(matches!(target, TargetFilter::Typed { .. }));
     }
 
@@ -1156,7 +1244,7 @@ mod tests {
             panic!("expected RemoveCounter, got {result:?}");
         };
         assert_eq!(counter_type, None);
-        assert_eq!(count, 1);
+        assert_eq!(count, QuantityExpr::Fixed { value: 1 });
     }
 
     #[test]
@@ -1175,7 +1263,7 @@ mod tests {
             panic!("expected RemoveCounter, got {result:?}");
         };
         assert_eq!(counter_type, None);
-        assert_eq!(count, 3);
+        assert_eq!(count, QuantityExpr::Fixed { value: 3 });
     }
 
     /// CR 608.2k anaphor: "remove those counters" with no "from {target}"
@@ -1206,7 +1294,11 @@ mod tests {
                 panic!("{input}: expected RemoveCounter, got {result:?}");
             };
             assert_eq!(counter_type, None, "{input}: counter_type None");
-            assert_eq!(count, -1, "{input}: sentinel -1 = all");
+            assert_eq!(
+                count,
+                QuantityExpr::Fixed { value: -1 },
+                "{input}: sentinel -1 = all"
+            );
             assert!(
                 matches!(target, TargetFilter::SelfRef),
                 "{input}: target SelfRef, got {target:?}"
@@ -1227,7 +1319,7 @@ mod tests {
             panic!("expected RemoveCounter, got {result:?}");
         };
         assert_eq!(counter_type, Some(CounterType::Plus1Plus1));
-        assert_eq!(count, 1);
+        assert_eq!(count, QuantityExpr::Fixed { value: 1 });
     }
 
     #[test]
@@ -1848,6 +1940,26 @@ mod tests {
         );
     }
 
+    // Finding-4 regression: the counter for-each suffix must stay anchored — the
+    // remainder must *begin* with `for each ` (whitespace-only head). A remainder
+    // where `for each` is preceded by unrelated text must NOT be treated as a
+    // multiplier (which would silently drop the leading clause).
+    #[test]
+    fn counter_for_each_suffix_requires_anchored_marker() {
+        // Anchored: remainder begins with `for each ` → matches.
+        assert!(
+            parse_counter_for_each_suffix("for each creature you control").is_some(),
+            "an anchored `for each` remainder must parse as a multiplier",
+        );
+        // Mid-clause: `for each` preceded by non-whitespace text → rejected, so the
+        // leading clause is not dropped.
+        assert!(
+            parse_counter_for_each_suffix("until end of turn for each creature you control")
+                .is_none(),
+            "a `for each` preceded by unrelated text must not be treated as a multiplier",
+        );
+    }
+
     /// #588 (Summon: Good King Mog XII, chapter IV — "Put two +1/+1 counters
     /// on each other Moogle you control"): a creature subtype absent from the
     /// curated `SUBTYPES` list silently dropped BOTH the `Subtype` type-filter
@@ -1886,6 +1998,34 @@ mod tests {
             "\"other\" must map to FilterProp::Another, got {:?}",
             tf.properties
         );
+    }
+
+    /// CR 122.8 + CR 400.7: "~'s counters" in a self-sacrifice activated
+    /// ability (Zack Fair) — source is the ability's ~, not the parent target.
+    #[test]
+    fn move_counters_self_possessive_counters() {
+        let lower = "put ~'s counters on that creature";
+        let result = try_parse_move_counters(lower, lower, &mut default_ctx());
+        let Some((
+            Effect::MoveCounters {
+                source,
+                counter_type,
+                count,
+                mode,
+                selection: _,
+                target,
+            },
+            rem,
+        )) = result
+        else {
+            panic!("expected MoveCounters, got {result:?}");
+        };
+        assert!(matches!(source, TargetFilter::SelfRef));
+        assert_eq!(counter_type, None);
+        assert_eq!(count, None);
+        assert_eq!(mode, CounterTransferMode::Put);
+        assert!(matches!(target, TargetFilter::ParentTarget));
+        assert!(rem.is_empty());
     }
 
     /// CR 122.8 + CR 400.7: "put those counters on [target]" — anaphoric
@@ -1990,7 +2130,7 @@ mod tests {
         assert!(
             tf.properties
                 .iter()
-                .any(|p| matches!(p, FilterProp::Attacking)),
+                .any(|p| matches!(p, FilterProp::Attacking { defender: None })),
             "target should be Attacking, got {:?}",
             tf.properties
         );
@@ -2023,5 +2163,87 @@ mod tests {
         assert_eq!(counter_type, CounterType::Keyword(KeywordKind::FirstStrike));
         assert_eq!(count, QuantityExpr::Fixed { value: 1 });
         assert!(matches!(target, TargetFilter::Typed { .. }));
+    }
+
+    /// CR 122.1 + CR 706.2: `parse_counter_equal_to` still handles the typed
+    /// quantity grammar (here a self-power object ref) with the correct
+    /// remainder — the event-context fallback must not regress the primary path.
+    #[test]
+    fn counter_equal_to_typed_quantity_unchanged() {
+        let (rest, qty) = parse_counter_equal_to("equal to its power then draw").unwrap();
+        assert!(matches!(qty, QuantityExpr::Ref { .. }));
+        // "its power" is consumed; the trailing clause survives in the remainder.
+        assert_eq!(rest, " then draw", "trailing clause must survive: {rest:?}");
+    }
+
+    /// CR 706.2: the die-roll / coin-flip back-reference "the result" routes
+    /// through the `parse_event_context_quantity` fallback to `EventContextAmount`
+    /// — the typed `parse_equal_to` grammar does not reach it, and it must NOT be
+    /// added to the shared `parse_quantity_ref` leaf (that would break the
+    /// `parse_cda_quantity` "returns None for the bare die-result phrase"
+    /// invariant the where-X binding depends on).
+    #[test]
+    fn counter_equal_to_the_result_binds_event_context_amount() {
+        let (rest, qty) = parse_counter_equal_to("equal to the result").unwrap();
+        assert_eq!(
+            qty,
+            QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
+    /// The event-context fallback preserves a trailing clause as the remainder,
+    /// matching nom's consume-and-remainder contract (so downstream
+    /// for-each / conditional clauses are not silently swallowed).
+    #[test]
+    fn counter_equal_to_the_result_preserves_trailing_clause() {
+        let (rest, qty) = parse_counter_equal_to("equal to the result, then draw a card").unwrap();
+        assert_eq!(
+            qty,
+            QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount
+            }
+        );
+        assert_eq!(rest, ", then draw a card");
+    }
+
+    /// End-to-end counter-entry (deferred post-target placement): "put +1/+1
+    /// counters on it equal to the result" must build a `PutCounter` bound to
+    /// `EventContextAmount`, never `Unimplemented`. This is the class the PR
+    /// targets (die-roll cards that pump via counters).
+    #[test]
+    fn put_counter_on_it_equal_to_the_result_binds_event_context_amount() {
+        let input = "put +1/+1 counters on it equal to the result";
+        let (effect, _rem, _multi) =
+            try_parse_put_counter(input, input, &mut default_ctx()).expect("must parse");
+        let Effect::PutCounter { count, .. } = effect else {
+            panic!("expected PutCounter, got {effect:?}");
+        };
+        assert_eq!(
+            count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount
+            }
+        );
+    }
+
+    /// Sibling shape: the "a number of {type} counters … equal to the result"
+    /// phrasing must bind the same ref via the eager / pre-target path.
+    #[test]
+    fn put_a_number_of_counters_equal_to_the_result_binds_event_context_amount() {
+        let input = "put a number of +1/+1 counters on it equal to the result";
+        let (effect, _rem, _multi) =
+            try_parse_put_counter(input, input, &mut default_ctx()).expect("must parse");
+        let Effect::PutCounter { count, .. } = effect else {
+            panic!("expected PutCounter, got {effect:?}");
+        };
+        assert_eq!(
+            count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount
+            }
+        );
     }
 }

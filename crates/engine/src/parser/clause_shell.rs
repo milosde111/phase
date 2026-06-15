@@ -242,19 +242,56 @@ fn is_specialized_duration_carrier(text_lower: &str) -> bool {
         value((), tag("cast those ")),
         value((), tag("cast it")),
         value((), tag("cast one of ")),
+        // CR 400.7i — Escape to the Wilds impulse-set anaphor. The trailing
+        // duration ("until the end of your next turn") must reach
+        // `try_parse_play_from_exile` to disambiguate vs. `Effect::CastFromZone`.
+        value((), tag("play cards exiled this way")),
+        value((), tag("play the cards exiled this way")),
+        value((), tag("cast cards exiled this way")),
+        value((), tag("cast the cards exiled this way")),
         // Full impulse-draw form (when the optional strip didn't fire
         // because we're a recursive sub-clause). Mirrors the alternatives
         // at `oracle_effect/mod.rs:2701`.
         value((), tag("you may play ")),
         value((), tag("you may cast ")),
+        // CR 400.7i + CR 118.9 — Gonti, Night Minister third-person impulse
+        // play with any-mana conjunct. Same deferral as the first-person forms.
+        value((), tag("they may play ")),
+        value((), tag("they may cast ")),
         // CR 601.2f — "the next [type] spell you cast this turn ..."
         // next-spell limiter (cost reduction, keyword grant). The
         // specialized parser at `oracle_effect/mod.rs:571` requires
         // "this turn" to be present in the input.
         value((), tag("the next ")),
+        // CR 305.2 — "play an additional land this turn" / "play <n> additional
+        // lands this turn" (Escape to the Wilds). `try_parse_additional_land_this_turn`
+        // requires the " this turn" suffix to discriminate the turn-scoped
+        // grant from the printed static ("on each of your turns") form.
+        parse_additional_land_head,
     ))
     .parse(text_lower);
     head.is_ok()
+}
+
+/// CR 305.2: Head matcher for the turn-scoped additional-land grant, used by
+/// `is_specialized_duration_carrier` so the trailing duration is deferred to
+/// `try_parse_additional_land_this_turn`.
+fn parse_additional_land_head(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
+    use nom::branch::alt;
+    use nom::bytes::complete::tag;
+    use nom::combinator::value;
+    alt((
+        value((), tag("play an additional land")),
+        value(
+            (),
+            (
+                tag("play "),
+                crate::parser::oracle_nom::primitives::parse_number,
+                tag(" additional lands"),
+            ),
+        ),
+    ))
+    .parse(input)
 }
 
 /// CR 608.2d: Suffixes after "you may " that have specialized parsing elsewhere
@@ -268,7 +305,20 @@ fn is_specialized_duration_carrier(text_lower: &str) -> bool {
 /// require the full surface form. Generic `you may search your library for X`
 /// likewise peels cleanly; the from-among continuation is handled by the
 /// prior sub_ability path (sequence.rs), not parse_effect_clause.
-fn is_specialized_you_may_phrase(rest_lower: &str) -> bool {
+/// CR 115.7: Retarget clauses that must keep the full `you may choose new
+/// targets for …` surface in the chunk loop so `try_parse_change_targets`
+/// dispatches. Narrower than `is_specialized_you_may_phrase` — Beseech-style
+/// `you may cast …` still peels `you may` here to set `optional: true`.
+pub(crate) fn is_specialized_you_may_retarget_phrase(rest_lower: &str) -> bool {
+    alt((
+        value((), tag::<_, _, OracleError<'_>>("choose new targets ")),
+        value((), tag("choose new target ")),
+    ))
+    .parse(rest_lower)
+    .is_ok()
+}
+
+pub(crate) fn is_specialized_you_may_phrase(rest_lower: &str) -> bool {
     // Head-only blocklist: phrases whose dedicated body parsers need the full
     // `you may <verb>` surface present in their input to dispatch correctly.
     let head: nom::IResult<&str, (), OracleError<'_>> = alt((
@@ -535,6 +585,14 @@ mod tests {
         assert_eq!(peeled, "draw a card");
         assert!(ctx.optional);
         assert_eq!(ctx.duration(), Some(&Duration::UntilEndOfTurn));
+    }
+
+    #[test]
+    fn peel_does_not_strip_you_may_choose_new_targets() {
+        let text = "you may choose new targets for target spell or ability";
+        let (peeled, ctx) = peel_clause(text);
+        assert_eq!(peeled, text);
+        assert!(!ctx.optional);
     }
 
     #[test]

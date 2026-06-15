@@ -221,18 +221,40 @@ pub fn resolve(
         });
     }
 
+    drive_copy_token_batches(
+        state,
+        remaining,
+        EffectKind::from(&ability.effect),
+        ability.source_id,
+        events,
+    );
+
+    Ok(())
+}
+
+/// CR 707.2 + CR 614.1a: Route a queue of `PendingCopyTokenBatch`es through the
+/// `CreateToken` replacement pipeline and apply path. Single authority shared by
+/// `CopyTokenOf` (battlefield-sourced copies) and `CreateTokenCopyFromPool`
+/// (format-pool-sourced copies) so the replacement + apply path is never
+/// duplicated. The drain can pause and resume when a CR 616.1 replacement choice
+/// is required.
+pub(crate) fn drive_copy_token_batches(
+    state: &mut GameState,
+    remaining: VecDeque<PendingCopyTokenBatch>,
+    effect_kind: EffectKind,
+    source_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) {
     drain_copy_token_resolution(
         state,
         PendingCopyTokenResolution {
             created_ids: Vec::new(),
             remaining,
-            effect_kind: EffectKind::from(&ability.effect),
-            source_id: ability.source_id,
+            effect_kind,
+            source_id,
         },
         events,
     );
-
-    Ok(())
 }
 
 pub(crate) fn drain_pending_copy_token_resolution(
@@ -3228,6 +3250,8 @@ mod tests {
                 .valid_card(TargetFilter::SelfRef)
                 .condition(TriggerCondition::AdditionalCostPaid {
                     source: AdditionalCostPaymentSource::Any,
+                    origin: None,
+                    origin_ordinal: None,
                     variant: None,
                     kicker_cost: None,
                     min_count: 1,

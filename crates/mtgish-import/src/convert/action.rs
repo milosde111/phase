@@ -375,7 +375,7 @@ fn rewrite_bound_x_in_ability_cost(cost: &mut AbilityCost, binding: &QuantityExp
         | AbilityCost::Tap
         | AbilityCost::Untap
         | AbilityCost::Loyalty { .. }
-        | AbilityCost::Sacrifice { .. }
+        | AbilityCost::Sacrifice(_)
         | AbilityCost::Exile { .. }
         // CR 702.167a/b: Craft materials carry no X-bound quantity.
         | AbilityCost::ExileMaterials { .. }
@@ -2813,7 +2813,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
         },
         Action::RemoveACounterOfTypeFromPermanent(ct, target) => Effect::RemoveCounter {
             counter_type: Some(counter_type_name(ct)),
-            count: 1,
+            count: QuantityExpr::Fixed { value: 1 },
             target: convert_permanent(target)?,
         },
 
@@ -3939,7 +3939,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
         // existing `players_to_controller` bridge for opponent detection.
         Action::ChooseAPlayer(players) => {
             let choice_type = match filter_mod::players_to_controller(players.as_ref()) {
-                Ok(ControllerRef::Opponent) => ChoiceType::Opponent,
+                Ok(ControllerRef::Opponent) => ChoiceType::Opponent { restriction: None },
                 _ => ChoiceType::Player,
             };
             Effect::Choose {
@@ -7281,6 +7281,7 @@ mod tests {
                 target: TargetFilter::Any,
                 scope: Default::default(),
                 damage_source_filter: None,
+                prevention_duration: None,
             },
             Effect::Discard {
                 count: QuantityExpr::Fixed { value: 1 },

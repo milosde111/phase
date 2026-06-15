@@ -68,9 +68,22 @@ pub mod mana_abilities;
 pub mod mana_payment;
 pub mod mana_sources;
 pub mod match_flow;
+pub mod meld;
+// Tests for `meld` live in a sibling file (declared here, not in `meld.rs`,
+// so `meld.rs` stays implementation-only).
+#[cfg(test)]
+#[path = "meld_tests.rs"]
+mod meld_tests;
 pub mod merge;
 // Tests for `merge` live in a sibling file (declared here, not in `merge.rs`,
 // so `merge.rs` stays implementation-only).
+pub mod archenemy;
+pub mod conspiracy;
+// Tests for `conspiracy` live in a sibling file (declared here, not in
+// `conspiracy.rs`, so `conspiracy.rs` stays implementation-only).
+#[cfg(test)]
+#[path = "conspiracy_tests.rs"]
+mod conspiracy_tests;
 #[cfg(test)]
 #[path = "merge_tests.rs"]
 mod merge_tests;
@@ -78,7 +91,19 @@ pub mod morph;
 pub mod mulligan;
 pub(crate) mod off_zone_characteristics;
 pub mod pairing;
+pub mod perf_counters;
+// Tests for `archenemy` live in a sibling file (declared here, not in
+// `archenemy.rs`, so `archenemy.rs` stays implementation-only).
+#[cfg(test)]
+#[path = "archenemy_tests.rs"]
+mod archenemy_tests;
 pub mod phasing;
+pub mod planechase;
+// Tests for `planechase` live in a sibling file (declared here, not in
+// `planechase.rs`, so `planechase.rs` stays implementation-only).
+#[cfg(test)]
+#[path = "planechase_tests.rs"]
+mod planechase_tests;
 pub mod planeswalker;
 pub mod players;
 pub mod printed_cards;

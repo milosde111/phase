@@ -1267,7 +1267,7 @@ fn choosable_objects(waiting_for: &WaitingFor, viewer: PlayerId) -> HashSet<Obje
         | WaitingFor::ChooseFromZoneChoice { player, cards, .. }
         | WaitingFor::EffectZoneChoice { player, cards, .. }
         | WaitingFor::DrawnThisTurnTopdeckChoice { player, cards, .. }
-        | WaitingFor::ManifestDreadChoice { player, cards }
+        | WaitingFor::ManifestDreadChoice { player, cards, .. }
         | WaitingFor::WardDiscardChoice { player, cards, .. }
         | WaitingFor::ConniveDiscard { player, cards, .. }
         | WaitingFor::PairChoice {
@@ -1882,6 +1882,7 @@ mod tests {
                     permanents: vec![ObjectId(22)],
                     pending_effect: Box::new(dummy_ability()),
                     remaining: 1,
+                    min_total_power: None,
                 },
                 PlayerId(0),
             ),

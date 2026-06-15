@@ -227,7 +227,7 @@ fn has_sacrifice_cost(card: &CardFace) -> bool {
         ability
             .cost
             .as_ref()
-            .is_some_and(|c| matches!(c, AbilityCost::Sacrifice { .. }))
+            .is_some_and(|c| matches!(c, AbilityCost::Sacrifice(_)))
     })
 }
 
@@ -250,7 +250,7 @@ fn has_recursion(card: &CardFace) -> bool {
     card.keywords.iter().any(|kw| {
         matches!(
             kw,
-            Keyword::Flashback(..) | Keyword::Escape { .. } | Keyword::Unearth(..)
+            Keyword::Flashback(..) | Keyword::Escape(_) | Keyword::Unearth(..)
         )
     })
 }
@@ -269,7 +269,8 @@ mod tests {
     use super::*;
     use engine::game::zones::create_object;
     use engine::types::ability::{
-        AbilityDefinition, AbilityKind, PtValue, QuantityExpr, TargetFilter, TriggerDefinition,
+        AbilityCost, AbilityDefinition, AbilityKind, PtValue, QuantityExpr, SacrificeCost,
+        TargetFilter, TriggerDefinition,
     };
     use engine::types::card_type::CardType;
     use engine::types::identifiers::CardId;
@@ -298,10 +299,10 @@ mod tests {
                 target: engine::types::ability::TargetFilter::Controller,
             },
         );
-        ability.cost = Some(AbilityCost::Sacrifice {
-            target: TargetFilter::Any,
-            count: 1,
-        });
+        ability.cost = Some(AbilityCost::Sacrifice(SacrificeCost::count(
+            TargetFilter::Any,
+            1,
+        )));
         DeckEntry {
             card: CardFace {
                 name: name.to_string(),

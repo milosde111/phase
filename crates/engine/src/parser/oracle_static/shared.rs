@@ -280,6 +280,169 @@ pub(crate) fn try_parse_inverted_attached_subject_grant(
     parse_continuous_gets_has(predicate.original, affected, description)
 }
 
+/// CR 508.1a + CR 611.3a + CR 613.1f: Inverted attached-subject grant gated on
+/// the host creature's COMBAT STATE — "As long as equipped/enchanted creature is
+/// attacking|blocking, it has/gets <X> [and <unmodeled conjunct>]" (Ace's
+/// Baseball Bat, Slayer's-Cleaver-style lure compounds).
+///
+/// Distinct from `try_parse_inverted_attached_subject_grant` (which keys on a
+/// STATIC characteristic and folds it into `affected`): combat state is
+/// re-evaluated each layer cycle (CR 611.3a), so it is bound as a
+/// `RecipientMatchesFilter` GATE on the recipient (the host creature) instead of
+/// folded into the filter. Gating on the source (the Equipment/Aura) — as the
+/// generic inverted fallback did via `SourceIsAttacking` — is wrong: an
+/// Equipment is never an attacker, so the static never fires, and the keyword
+/// would land on the Equipment rather than the host.
+///
+/// Returns a `Vec` so that any conjunct of the effect predicate which
+/// `push_grant_clause_modifications` cannot model (e.g. "must be blocked by a
+/// Dalek if able") is surfaced as a sibling `Effect::Unimplemented` residual,
+/// rather than being silently dropped. The residual makes coverage mark the card
+/// partially unsupported (`is_static_supported`) and the swallow check defer
+/// (`any_ability_has_unimplemented`) — an honest signal independent of the
+/// whole-card `"condition":{` suppression that the supported static's gate would
+/// otherwise trip in `detect_condition_if`.
+///
+/// DEFER: typed "must be blocked by <filter> if able" requires parameterizing
+/// the `MustBeBlocked`/`MustBeBlockedByAll` requirement family with a blocker
+/// filter — /add-engine-variant Stage-2 REFUSE_WITH_REFACTOR (~80 sites). Until
+/// then the dropped conjunct rides as an `Effect::Unimplemented` residual. An
+/// `Unrecognized`-condition companion is NOT used: it would suppress
+/// `detect_condition_if` (cond_markers include `"condition":{`) AND be
+/// runtime-active (`layers.rs` evaluates `Unrecognized => true`). CR 509.1c.
+pub(crate) fn try_parse_inverted_attached_combat_grant(
+    split: &InvertedSplit,
+    description: &str,
+) -> Vec<StaticDefinition> {
+    let condition_lower = split.condition_text.to_lowercase();
+    // CR 611.3a: bind the combat state to the recipient, not the source.
+    let Ok((cond_rest, (affected, combat_prop))) =
+        nom_condition::parse_attached_subject_combat_state(&condition_lower)
+    else {
+        return Vec::new();
+    };
+    if !cond_rest.trim().is_empty() {
+        return Vec::new();
+    }
+
+    let effect_lower = split.effect_text.to_lowercase();
+    let effect_tp = TextPair::new(&split.effect_text, &effect_lower);
+    // Strip the anaphoric subject ("it "/"they ") to reach the bare predicate.
+    let Some(predicate) = nom_tag_tp(&effect_tp, "it ").or_else(|| nom_tag_tp(&effect_tp, "they "))
+    else {
+        return Vec::new();
+    };
+    let predicate_body = predicate.original.trim();
+
+    // CR 613.1f: parse the whole predicate ("has first strike and must be
+    // blocked by a Dalek if able") into its modeled continuous modifications
+    // (P/T + keyword grants). `parse_continuous_modifications` is the single
+    // authority for the grant portion and merges everything it can model; it does
+    // not consume combat-requirement / lure conjuncts ("must be blocked …").
+    let modifications = parse_continuous_modifications(predicate_body);
+
+    // CR 611.3a + CR 508.1a: gate the supported grant on the recipient (the
+    // equipped/enchanted creature) being in the stated combat state.
+    let gate = StaticCondition::RecipientMatchesFilter {
+        filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![combat_prop])),
+    };
+    let mut defs = Vec::new();
+    if !modifications.is_empty() {
+        defs.push(
+            StaticDefinition::continuous()
+                .affected(affected.clone())
+                .modifications(modifications)
+                .condition(gate.clone())
+                .description(description.to_string()),
+        );
+    }
+
+    // CR 613.1f: identify conjuncts NOT covered by the grant above — the
+    // combat-requirement / lure conjuncts. Strip a leading verb ("has "/"have ")
+    // and split the conjunction; a conjunct that `parse_continuous_modifications`
+    // (with the verb re-attached) cannot model is a residual to classify below.
+    let body_lower = predicate_body.to_lowercase();
+    let list_input = nom_tag_lower(predicate_body, &body_lower, "has ")
+        .or_else(|| nom_tag_lower(predicate_body, &body_lower, "have "))
+        .unwrap_or(predicate_body);
+    let mut residual_conjuncts: Vec<String> = Vec::new();
+    for part in split_keyword_list(list_input.trim().trim_end_matches('.')) {
+        let conjunct = part.trim();
+        if conjunct.is_empty() {
+            continue;
+        }
+        let conjunct_lower = conjunct.to_lowercase();
+        // A conjunct that carries its own grant verb keeps that verb; a bare
+        // keyword conjunct is re-parsed as a grant only when re-prefixed with
+        // "has ". If neither form yields a continuous modification, it is a
+        // requirement/lure residual.
+        let grant_probe = if parse_grant_conjunct_verb(&conjunct_lower).is_ok() {
+            conjunct.to_string()
+        } else {
+            format!("has {conjunct}")
+        };
+        if parse_continuous_modifications(&grant_probe).is_empty() {
+            residual_conjuncts.push(conjunct.to_string());
+        }
+    }
+
+    for residual_text in residual_conjuncts {
+        // CR 508.1d / CR 509.1c / CR 701.15b: A conjunct `push_grant_clause_modifications`
+        // can't model may still be a recognized combat REQUIREMENT ("must be blocked
+        // if able", "attacks each combat if able", "is goaded"). Recover it via the
+        // rule-static predicate combinator and emit a sibling rule-static gated on the
+        // same combat condition — modeled, not an `Unimplemented` residual. (The
+        // FILTERED "must be blocked by a Dalek if able" form is NOT recognized by the
+        // combinator, so it correctly falls through to the residual below.)
+        let residual_lower = residual_text.to_lowercase();
+        if let Ok((rest, predicate)) =
+            all_consuming(parse_rule_static_predicate_nom).parse(residual_lower.trim())
+        {
+            let _ = rest;
+            let mut companion = lower_rule_static(predicate, affected.clone(), &residual_text);
+            companion.condition = Some(gate.clone());
+            defs.push(companion);
+            continue;
+        }
+
+        // CR 509.1c: surface the still-unmodeled conjunct as an `Effect::Unimplemented`
+        // residual carried in a `GrantAbility` modification so coverage flags it and
+        // the swallow check defers (see fn-level note). The stable category key
+        // groups the gap in coverage; the raw conjunct text is the diagnostic.
+        defs.push(
+            StaticDefinition::continuous()
+                .affected(affected.clone())
+                .modifications(vec![ContinuousModification::GrantAbility {
+                    definition: Box::new(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        crate::types::ability::Effect::unimplemented(
+                            "attached_grant_unmodeled_conjunct",
+                            residual_text.clone(),
+                        ),
+                    )),
+                }])
+                .description(residual_text),
+        );
+    }
+
+    defs
+}
+
+fn parse_grant_conjunct_verb(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        alt((
+            tag("gets "),
+            tag("get "),
+            tag("has "),
+            tag("have "),
+            tag("gains "),
+            tag("gain "),
+        )),
+    )
+    .parse(input)
+}
+
 /// Parse the attached-subject qualifier of an inverted grant
 /// ("enchanted/equipped creature is `<characteristic>`") into the `affected`
 /// `TargetFilter` for the enchanted/equipped permanent.
@@ -468,10 +631,143 @@ pub(crate) fn parse_static_line_multi_ir(text: &str) -> Vec<StaticIr> {
         .collect()
 }
 
+/// CR 611.3 + CR 613.1: Split a static line into its sentence segments, then
+/// parse each as an independent continuous static. Returns `Some(defs)` only
+/// when the line splits into 2+ segments and EVERY segment yields at least one
+/// `StaticDefinition` — i.e. the line is genuinely a sequence of sibling
+/// statics (dual-subject anthems and their relatives). When any segment is
+/// non-static prose (or there is only one sentence) this returns `None`, so the
+/// single-sentence pipeline keeps ownership of the line.
+///
+/// Each segment is re-entered through `parse_static_line_multi_inner` so that a
+/// sentence which itself decomposes (e.g. "<grant> and can't block") still
+/// emits all of its own statics. Recursion terminates because a single-sentence
+/// segment produces only one `split_static_sentences` segment, which fails the
+/// 2+ guard.
+fn parse_multi_sentence_statics(text: &str) -> Option<Vec<StaticDefinition>> {
+    let segments = split_static_sentences(text);
+    if segments.len() < 2 {
+        return None;
+    }
+    // CR 611.3a: A sentence that opens with a back-referential connector
+    // ("Otherwise", "Then", "Instead") is a continuation whose meaning depends
+    // on the prior clause's condition (Hunter's Blowgun's ". Otherwise, it has
+    // reach." gates on `Not(<head condition>)`; the same holds for "as long
+    // as"-gated alternatives). Splitting these into independent statics would
+    // drop the complement condition, so defer the whole line to the dedicated
+    // attached-subject / otherwise handlers downstream.
+    if segments
+        .iter()
+        .skip(1)
+        .any(|segment| segment_is_back_referential_continuation(segment))
+    {
+        return None;
+    }
+    let mut defs = Vec::new();
+    for segment in &segments {
+        let segment_defs = parse_static_line_multi_inner(segment);
+        if segment_defs.is_empty() {
+            // A non-static sentence (or one the static pipeline can't classify)
+            // means this isn't a pure sibling-static line — defer the whole
+            // line to the single-sentence fallback rather than emitting a
+            // partial result that silently drops the unparsed sentence.
+            return None;
+        }
+        defs.extend(segment_defs);
+    }
+    Some(defs)
+}
+
+/// CR 611.3a: Recognize a sentence whose leading connector binds it to the
+/// preceding clause's condition rather than standing on its own. Such a sentence
+/// must not be split off as an independent static.
+fn segment_is_back_referential_continuation(segment: &str) -> bool {
+    let lower = segment.to_lowercase();
+    let result: OracleResult<'_, &str> =
+        alt((tag("otherwise"), tag("instead"), tag("then "))).parse(lower.as_str());
+    result.is_ok()
+}
+
+/// Split a static line on sentence boundaries (`.` followed by whitespace or
+/// end-of-input), tracking `{…}` mana-symbol and quote nesting so a period
+/// inside a quoted granted ability or a mana symbol never ends a sentence. Each
+/// returned segment keeps its terminating period and is trimmed; empty segments
+/// are dropped.
+fn split_static_sentences(text: &str) -> Vec<String> {
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    let mut brace_depth = 0usize;
+    let mut in_double_quote = false;
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        current.push(ch);
+        match ch {
+            '{' if !in_double_quote => brace_depth += 1,
+            '}' if !in_double_quote => brace_depth = brace_depth.saturating_sub(1),
+            '"' => in_double_quote = !in_double_quote,
+            // A sentence ends at a period that is followed by whitespace or
+            // end-of-input. A period directly followed by a non-space (e.g. an
+            // ellipsis or a decimal that MTG static text never uses) is kept
+            // inside the current segment.
+            '.' if brace_depth == 0
+                && !in_double_quote
+                && chars.peek().is_none_or(|next| next.is_whitespace()) =>
+            {
+                let trimmed = current.trim();
+                if !trimmed.is_empty() {
+                    segments.push(trimmed.to_string());
+                }
+                current.clear();
+            }
+            _ => {}
+        }
+    }
+    let trailing = current.trim();
+    if !trailing.is_empty() {
+        segments.push(trailing.to_string());
+    }
+    segments
+}
+
 pub(crate) fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition> {
     let stripped = strip_reminder_text(text);
     let lower = stripped.to_lowercase();
     let tp = TextPair::new(&stripped, &lower);
+
+    // CR 611.3 + CR 613.1: A static ability whose Oracle text is several
+    // independent sentences (each a self-contained continuous effect) defines
+    // each sentence as its own continuous effect with its own affected set.
+    // Dual-subject anthems are the canonical class — e.g. Flowering of the
+    // White Tree ("Legendary creatures you control get +2/+1 and have ward {1}.
+    // Nonlegendary creatures you control get +1/+1."), Intangible Virtue
+    // siblings, Glorious Anthem variants, the *-Tribute supertype pairs. Without
+    // this split the single-sentence pipeline parses the first sentence,
+    // swallows the period, and drops every following sentence. Split into
+    // sentence segments and parse each independently; only adopt the split when
+    // there are 2+ segments and EVERY segment yields at least one static, which
+    // restricts the path to genuine sibling-static lines and leaves trailing
+    // non-static prose to the single-sentence fallback below.
+    if let Some(defs) = parse_multi_sentence_statics(&stripped) {
+        return defs;
+    }
+
+    // CR 508.1a + CR 611.3a + CR 613.1f: Inverted attached-subject grant gated on
+    // the host creature's COMBAT STATE — "As long as equipped/enchanted creature
+    // is attacking|blocking, it has/gets <X> [and <unmodeled conjunct>]" (Ace's
+    // Baseball Bat). This must run on the multi-static path (and before the
+    // single-return fallback) for two reasons: (1) the generic inverted rewrite
+    // would gate the grant on `SourceIsAttacking` (the Equipment, never an
+    // attacker) with `affected = SelfRef` — both wrong; (2) the compound effect
+    // may carry an unmodeled conjunct (the "must be blocked by a Dalek if able"
+    // lure) that must surface as a sibling `Effect::Unimplemented` residual
+    // rather than being silently dropped. The single-return path can carry only
+    // one def, so the residual would have nowhere to live there.
+    if let Some(split) = try_split_inverted_as_long_as(&tp) {
+        let defs = try_parse_inverted_attached_combat_grant(&split, &stripped);
+        if !defs.is_empty() {
+            return defs;
+        }
+    }
 
     // CR 601.2 + CR 602.5: City of Solitude class — "can cast spells and
     // activate abilities only during {your | their own} turn(s)". Emits both
@@ -513,19 +809,26 @@ pub(crate) fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition>
         ];
     }
 
-    // CR 506.5 + CR 508.1a + CR 509.1b: "can't attack or block alone" (Mogg
-    // Flunkies) imposes both the attack-alone and block-alone restrictions.
+    // CR 506.5 + CR 508.1c + CR 509.1b: "can't attack or block alone" (Mogg
+    // Flunkies) imposes both CombatAlone(Attack,NeedsCompanion) and
+    // CombatAlone(Block,NeedsCompanion).
     if let Some((_, AloneCombatRestriction::AttackOrBlock, rest)) =
         nom_primitives::scan_preceded(&lower, parse_alone_combat_restriction)
     {
         if rest.trim().is_empty() {
             return vec![
-                StaticDefinition::new(StaticMode::CantAttackAlone)
-                    .affected(TargetFilter::SelfRef)
-                    .description(stripped.to_string()),
-                StaticDefinition::new(StaticMode::CantBlockAlone)
-                    .affected(TargetFilter::SelfRef)
-                    .description(stripped.to_string()),
+                StaticDefinition::new(StaticMode::CombatAlone {
+                    action: CombatAloneAction::Attack,
+                    requirement: CombatAloneRequirement::NeedsCompanion,
+                })
+                .affected(TargetFilter::SelfRef)
+                .description(stripped.to_string()),
+                StaticDefinition::new(StaticMode::CombatAlone {
+                    action: CombatAloneAction::Block,
+                    requirement: CombatAloneRequirement::NeedsCompanion,
+                })
+                .affected(TargetFilter::SelfRef)
+                .description(stripped.to_string()),
             ];
         }
     }
@@ -635,6 +938,14 @@ pub(crate) fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition>
         return defs;
     }
 
+    // CR 508.1d: "<grant or restriction> and can't attack you [or planeswalkers
+    // you control]" — the Vow cycle (Vow of Lightning / Duty / Flight / Torment
+    // / Wildness). Registered before the bare-attack splitter so the more
+    // specific scoped phrase is consumed first.
+    if let Some(defs) = try_split_and_cant_attack_scoped(&stripped) {
+        return defs;
+    }
+
     // CR 508.1c: "<grant> and can't attack" pairs a P/T (or keyword) grant with an
     // attacking restriction under one subject (Cagemail). Split so the CantAttack
     // clause is not dropped. The terminal-phrase guard keeps the scoped
@@ -681,6 +992,15 @@ pub(crate) fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition>
     // clause with a sacrifice prohibition under one subject (Assault Suit). Split
     // so the CantBeSacrificed clause is not dropped.
     if let Some(defs) = try_split_and_cant_be_sacrificed(&stripped) {
+        return defs;
+    }
+
+    // CR 611.3a + CR 613.1f: "PRIMARY and FOREIGN_SUBJECT have/has/gains/gain
+    // KEYWORD [as long as COND]" — compound static where the second conjunct has
+    // a different subject (e.g., Angelic Field Marshal: "~ gets +2/+2 and
+    // creatures you control have vigilance as long as you control your commander").
+    // Must run before the single-return fallback that can only produce one def.
+    if let Some(defs) = try_split_and_foreign_keyword_grant(&stripped) {
         return defs;
     }
 
@@ -1593,7 +1913,10 @@ pub(crate) fn parse_modified_creature_subject_filter(subject: &str) -> Option<Ta
 
     let controlled_patterns = [
         ("tapped creatures you control", FilterProp::Tapped),
-        ("attacking creatures you control", FilterProp::Attacking),
+        (
+            "attacking creatures you control",
+            FilterProp::Attacking { defender: None },
+        ),
         // CR 700.9: "modified creatures you control" — permanents with
         // counters, equipped, or enchanted by own-controlled Aura.
         ("modified creatures you control", FilterProp::Modified),
@@ -1612,7 +1935,7 @@ pub(crate) fn parse_modified_creature_subject_filter(subject: &str) -> Option<Ta
 
     if tp.lower == "attacking creatures" {
         return Some(TargetFilter::Typed(
-            TypedFilter::creature().properties(vec![FilterProp::Attacking]),
+            TypedFilter::creature().properties(vec![FilterProp::Attacking { defender: None }]),
         ));
     }
 
@@ -2299,7 +2622,8 @@ pub(crate) fn parse_rule_static_predicate_nom(
     Ok((rest, predicate))
 }
 
-/// Combat-rule predicate plus optional CR 508.1d defended scope (`CantAttack` only).
+/// Combat-rule predicate plus optional CR 508.1b + CR 508.1c defended scope
+/// (`CantAttack` only).
 pub(crate) fn parse_combat_rule_static_predicate_with_defended_nom(
     input: &str,
 ) -> OracleResult<
@@ -2361,26 +2685,53 @@ pub(crate) fn parse_combat_rule_static_predicate_with_defended_nom(
 
 pub(crate) fn parse_rule_static_tail_predicate_nom(
     input: &str,
-) -> OracleResult<'_, RuleStaticPredicate> {
+) -> OracleResult<
+    '_,
+    (
+        RuleStaticPredicate,
+        Option<crate::types::triggers::AttackTargetFilter>,
+    ),
+> {
     alt((
-        parse_rule_static_predicate_nom,
-        value(RuleStaticPredicate::CantBlock, tag("block")),
-        value(
-            RuleStaticPredicate::CantCrew,
-            (tag("crew"), opt(preceded(space1, tag("vehicles")))),
+        map(
+            parse_combat_rule_static_predicate_with_defended_nom,
+            |(predicate, defended)| (predicate, defended),
         ),
-        value(
-            RuleStaticPredicate::CantBeActivated,
-            alt((
-                tag("have its activated abilities activated"),
-                tag("have their activated abilities activated"),
-            )),
+        map(parse_rule_static_predicate_nom, |predicate| {
+            (predicate, None)
+        }),
+        map(value(RuleStaticPredicate::CantBlock, tag("block")), |p| {
+            (p, None)
+        }),
+        map(
+            value(
+                RuleStaticPredicate::CantCrew,
+                (tag("crew"), opt(preceded(space1, tag("vehicles")))),
+            ),
+            |p| (p, None),
+        ),
+        map(
+            value(
+                RuleStaticPredicate::CantBeActivated,
+                alt((
+                    tag("have its activated abilities activated"),
+                    tag("have their activated abilities activated"),
+                )),
+            ),
+            |p| (p, None),
         ),
     ))
     .parse(input)
 }
 
-pub(crate) fn parse_rule_static_tail_predicates(rest: &str) -> Option<Vec<RuleStaticPredicate>> {
+pub(crate) fn parse_rule_static_tail_predicates(
+    rest: &str,
+) -> Option<
+    Vec<(
+        RuleStaticPredicate,
+        Option<crate::types::triggers::AttackTargetFilter>,
+    )>,
+> {
     let mut remaining = rest;
     let mut predicates = Vec::new();
 
@@ -2390,14 +2741,14 @@ pub(crate) fn parse_rule_static_tail_predicates(rest: &str) -> Option<Vec<RuleSt
             return Some(predicates);
         }
         let (after_separator, _) = parse_rule_static_separator_nom(trimmed).ok()?;
-        let (after_predicate, predicate) =
+        let (after_predicate, (predicate, defended)) =
             parse_rule_static_tail_predicate_nom(after_separator).ok()?;
-        predicates.push(predicate);
+        predicates.push((predicate, defended));
         remaining = after_predicate;
     }
 }
 
-/// Optional attack-target scope after "can't attack" (CR 508.1d).
+/// Optional attack-target scope after "can't attack" (CR 508.1b + CR 508.1c).
 pub(crate) fn parse_cant_attack_defended_scope_nom(
     input: &str,
 ) -> OracleResult<'_, Option<crate::types::triggers::AttackTargetFilter>> {
@@ -2415,12 +2766,25 @@ pub(crate) fn parse_cant_attack_defended_scope_nom(
 pub(crate) fn parse_cant_attack_rule_static_predicate_nom(
     input: &str,
 ) -> OracleResult<'_, Option<crate::types::triggers::AttackTargetFilter>> {
+    use crate::types::triggers::AttackTargetFilter;
+
     let (rest, _) = tag("can't attack").parse(input)?;
-    let (rest, _) = opt(preceded(space1, tag("its owner"))).parse(rest)?;
+    let (rest, owner_restriction) = opt(preceded(
+        space1,
+        alt((
+            value(
+                AttackTargetFilter::OwnerOrPlaneswalker,
+                tag("its owner or planeswalkers its owner controls"),
+            ),
+            value(AttackTargetFilter::Owner, tag("its owner")),
+        )),
+    ))
+    .parse(rest)?;
     let (rest, a_player) = opt(preceded(space1, tag("a player"))).parse(rest)?;
     let (rest, defended) = parse_cant_attack_defended_scope_nom(rest)?;
-    use crate::types::triggers::AttackTargetFilter;
-    let defended = if a_player.is_some() {
+    let defended = if let Some(owner_restriction) = owner_restriction {
+        Some(owner_restriction)
+    } else if a_player.is_some() {
         Some(AttackTargetFilter::Player)
     } else {
         defended

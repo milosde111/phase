@@ -1258,6 +1258,7 @@ mod tests {
                     ContinuousModification::AddToughness { value: 1 },
                 ],
                 condition: None,
+                duration_subject: None,
                 source_name: String::new(),
             });
 
@@ -2870,6 +2871,7 @@ mod tests {
                 target: TargetFilter::Controller,
                 scope: PreventionScope::CombatDamage,
                 damage_source_filter: None,
+                prevention_duration: None,
             },
             vec![],
             shield_source,

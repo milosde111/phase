@@ -742,6 +742,25 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                 Some(*player),
             ),
         ],
+        // CR 508.1g + CR 702.154a: Enlist is optional and the engine has
+        // already computed the eligible tap set for this instance.
+        WaitingFor::EnlistChoice {
+            player, eligible, ..
+        } => std::iter::once(candidate(
+            GameAction::ChooseEnlist { target: None },
+            TacticalClass::Pass,
+            Some(*player),
+        ))
+        .chain(eligible.iter().map(|target| {
+            candidate(
+                GameAction::ChooseEnlist {
+                    target: Some(*target),
+                },
+                TacticalClass::Utility,
+                Some(*player),
+            )
+        }))
+        .collect(),
         WaitingFor::EquipTarget {
             player,
             equipment_id,
@@ -922,9 +941,12 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             constraint,
             ..
         } => {
-            // CR 107.1c + CR 701.23d: "any number of" / "up to N" searches enumerate
-            // combination sizes 0..=count; exact-count searches enumerate only `count`.
-            let sizes: Vec<usize> = if *up_to {
+            // CR 701.23b/d: constrained (stated-quality) searches enumerate 0..=count
+            // so the legal-action set always contains the empty fail-to-find plus
+            // valid partials; pure-quantity exact-count searches enumerate only
+            // `count`. `combinations(_, 0)` returns `vec![vec![]]`, so the empty
+            // decline survives the constraint filter below.
+            let sizes: Vec<usize> = if *up_to || constraint.permits_partial_find() {
                 (0..=*count).collect()
             } else {
                 vec![*count]
@@ -2338,7 +2360,7 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             )]
         }
         // CR 701.62a: AI selects one card to manifest — one action per card option
-        WaitingFor::ManifestDreadChoice { player, cards } => {
+        WaitingFor::ManifestDreadChoice { player, cards, .. } => {
             if cards.is_empty() {
                 vec![candidate(
                     GameAction::SelectCards { cards: vec![] },
@@ -2750,6 +2772,37 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
                                 TacticalClass::Spell,
                                 Some(player),
                             ));
+                        }
+                    }
+                }
+            }
+        }
+
+        // CR 114.4 + CR 602.1: Command-zone activated abilities (Momir Basic
+        // emblem). Mirrors the battlefield loop above; `can_activate_ability_now`
+        // honors each ability's `activation_zone` (casting.rs), so legality is
+        // unchanged. Gated on the format's command-zone capability so non-Momir
+        // games pay no extra scan.
+        if state.format_config.command_zone {
+            for &obj_id in &state.command_zone {
+                if let Some(obj) = state.objects.get(&obj_id) {
+                    if obj.controller == player {
+                        for (i, ability_def) in
+                            casting::activated_ability_definitions(state, obj_id)
+                        {
+                            if ability_def.kind == crate::types::ability::AbilityKind::Activated
+                                && !crate::game::mana_abilities::is_mana_ability(&ability_def)
+                                && casting::can_activate_ability_now(state, player, obj_id, i)
+                            {
+                                actions.push(candidate(
+                                    GameAction::ActivateAbility {
+                                        source_id: obj_id,
+                                        ability_index: i,
+                                    },
+                                    TacticalClass::Ability,
+                                    Some(player),
+                                ));
+                            }
                         }
                     }
                 }
@@ -4227,8 +4280,8 @@ mod tests {
     use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, BasicLandType,
         ChoiceType, ChosenAttribute, ChosenSubtypeKind, ContinuousModification, Effect, EffectKind,
-        FilterProp, ManaContribution, ManaProduction, QuantityExpr, StaticDefinition, TargetFilter,
-        TargetRef, TypedFilter,
+        FilterProp, ManaContribution, ManaProduction, QuantityExpr, SacrificeCost,
+        StaticDefinition, TargetFilter, TargetRef, TypedFilter,
     };
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::keywords::{Keyword, KeywordKind};
@@ -4851,6 +4904,7 @@ mod tests {
             enters_attacking: false,
             owner_library: false,
             track_exiled_by_source: false,
+            face_down_profile: None,
             count_param: 0,
         };
 
@@ -5316,13 +5370,13 @@ mod tests {
                         target: None,
                     },
                 )
-                .cost(AbilityCost::Sacrifice {
-                    target: TargetFilter::Typed(
+                .cost(AbilityCost::Sacrifice(SacrificeCost::count(
+                    TargetFilter::Typed(
                         crate::types::ability::TypedFilter::creature()
                             .controller(crate::types::ability::ControllerRef::You),
                     ),
-                    count: 1,
-                }),
+                    1,
+                ))),
             );
         }
 
@@ -5398,10 +5452,10 @@ mod tests {
                         target: None,
                     },
                 )
-                .cost(AbilityCost::Sacrifice {
-                    target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
-                    count: 1,
-                }),
+                .cost(AbilityCost::Sacrifice(SacrificeCost::count(
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
+                    1,
+                ))),
             );
         }
 
@@ -5527,7 +5581,11 @@ mod tests {
     /// duplicate-named entry is collapsed to its canonical id before
     /// combinations are generated (a duplicate cannot legally appear in any
     /// chosen set with its twin), so a 5-card pool with one duplicate
-    /// collapses to 4 unique-name ids → C(4,2) = 6 combinations.
+    /// collapses to 4 unique-name ids. Because a stated-quality constraint
+    /// permits partial finds (CR 701.23b/d — a player may find fewer than the
+    /// stated number, including none), the enumeration covers every size
+    /// 0..=count, i.e. C(4,0)+C(4,1)+C(4,2) = 1+4+6 = 11 combinations — each of
+    /// which is still name-unique.
     #[test]
     fn search_choice_candidates_filter_distinct_names() {
         use crate::types::ability::{SearchSelectionConstraint, SharedQuality};
@@ -5566,9 +5624,10 @@ mod tests {
         );
 
         // With distinct names the engine pool cap collapses the duplicate
-        // Alpha to a single canonical id (5 → 4 ids), and the post-hoc
-        // selection-constraint filter then enumerates C(4,2) = 6 combos —
-        // every one of which contains two distinct names.
+        // Alpha to a single canonical id (5 → 4 ids). The constraint permits
+        // partial finds (CR 701.23b/d), so the enumeration covers sizes
+        // 0..=count = C(4,0)+C(4,1)+C(4,2) = 1+4+6 = 11 combos — every one of
+        // which is name-unique (no combo contains two cards sharing a name).
         state.waiting_for = WaitingFor::SearchChoice {
             player: PlayerId(0),
             cards: ids,
@@ -5583,8 +5642,9 @@ mod tests {
         let filtered = candidate_actions_broad(&state);
         assert_eq!(
             filtered.len(),
-            6,
-            "distinct names must collapse duplicate-named ids before enumeration"
+            11,
+            "distinct names collapse duplicate-named ids (5→4) before enumeration; \
+             partial finds permitted (CR 701.23b/d) so sizes 0..=2 → 1+4+6 = 11"
         );
         for action in &filtered {
             let GameAction::SelectCards { cards } = &action.action else {

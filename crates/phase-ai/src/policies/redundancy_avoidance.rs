@@ -385,6 +385,7 @@ fn redundancy_delta(
         | Effect::ChangeZoneAll { .. }
         | Effect::Dig { .. }
         | Effect::GainControl { .. }
+        | Effect::GainControlAll { .. }
         | Effect::ControlNextTurn { .. }
         | Effect::Attach { .. }
         | Effect::UnattachAll { .. }
@@ -407,10 +408,16 @@ fn redundancy_delta(
         | Effect::EpicCopy { .. }
         | Effect::CastCopyOfCard { .. }
         | Effect::CopyTokenOf { .. }
+        // Random pool copy (Momir Basic) — not a "redundant if already
+        // controlled" effect; the token's identity is chosen at resolution.
+        | Effect::CreateTokenCopyFromPool { .. }
         | Effect::Myriad
         // CR 702.141a: Encore makes per-opponent copy tokens — like Myriad, it is
         // not a "redundant if already controlled" effect.
         | Effect::Encore
+        // CR 701.42a: Meld exiles both halves of a meld pair and materializes a
+        // single combined permanent — not a "redundant if already controlled" one.
+        | Effect::Meld { .. }
         // CR 702.75a: HideawayConceal is an internal continuation step of the
         // Hideaway ETB trigger (turn the just-exiled card face down + link it);
         // it is never independently chosen, so it carries no redundancy signal.
@@ -474,6 +481,7 @@ fn redundancy_delta(
         | Effect::VentureIntoDungeon
         | Effect::VentureInto { .. }
         | Effect::TakeTheInitiative
+        | Effect::Planeswalk
         | Effect::GrantCastingPermission { .. }
         | Effect::ChooseFromZone { .. }
         | Effect::ChooseObjectsIntoTrackedSet { .. }
@@ -494,6 +502,8 @@ fn redundancy_delta(
         | Effect::ChangeTargets { .. }
         | Effect::Manifest { .. }
         | Effect::ManifestDread
+        | Effect::Cloak { .. }
+        | Effect::TurnFaceUp { .. }
         | Effect::ExtraTurn { .. }
         | Effect::GrantExtraLoyaltyActivations { .. }
         | Effect::SkipNextTurn { .. }

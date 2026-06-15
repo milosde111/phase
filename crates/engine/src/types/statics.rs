@@ -563,6 +563,14 @@ pub enum CostModifyMode {
     Minimum,
 }
 
+/// CR 601.2f: Whether a static-imposed additional cost applies to spell casting.
+/// Distinct from [`CostModifyMode`], which only adjusts the mana component.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AdditionalCostTaxAction {
+    /// "... cost an additional N life to cast."
+    Cast,
+}
+
 /// CR 702.122c: How a creature's contributed power is modified when it crews a
 /// Vehicle, saddles a Mount, or stations a permanent. See [`StaticMode::CrewContribution`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -580,6 +588,22 @@ pub enum CrewAction {
     Crew,
     Saddle,
     Station,
+}
+
+/// Which combat action the `CombatAlone` restriction governs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CombatAloneAction {
+    Attack,
+    Block,
+}
+
+/// The polarity of a `CombatAlone` static.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CombatAloneRequirement {
+    /// "can't X alone" — the creature must NOT be the sole attacker/blocker.
+    NeedsCompanion,
+    /// "can only X alone" — the creature must BE the sole attacker; companions are prohibited.
+    MustBeSole,
 }
 
 /// All static ability modes from Forge's static ability registry.
@@ -718,6 +742,16 @@ pub enum StaticMode {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         dynamic_count: Option<QuantityRef>,
     },
+    /// CR 601.2f + CR 118.8: Imposes an additional non-mana cost on spells or
+    /// spells matching `spell_filter`. Distinct from [`StaticMode::ModifyCost`],
+    /// which adjusts only the mana component. Terror of the Peaks class:
+    /// "Spells your opponents cast that target this creature cost an additional
+    /// 3 life to cast."
+    ImposeAdditionalCost {
+        cost: super::ability::AbilityCost,
+        spell_filter: Option<TargetFilter>,
+        action: AdditionalCostTaxAction,
+    },
     /// CR 601.2f: Reduces the generic mana cost of activated abilities matching a keyword type.
     /// E.g., "Ninjutsu abilities you activate cost {1} less to activate."
     /// `keyword` identifies which ability type is reduced (e.g., "ninjutsu", "equip", "cycling").
@@ -814,6 +848,11 @@ pub enum StaticMode {
     /// Variants: "your library" (controller only) or "their libraries" (all players).
     RevealTopOfLibrary {
         all_players: bool,
+    },
+    /// CR 400.2 + CR 701.20a: Play with hands revealed.
+    /// `who` identifies whose hand is public: controller, opponents, or all players.
+    RevealHand {
+        who: ProhibitionScope,
     },
     /// CR 604.2 + CR 305.1: Static ability granting permission to play/cast
     /// matching cards from owner's graveyard.
@@ -926,6 +965,29 @@ pub enum StaticMode {
         #[serde(default)]
         timing: ExileCastTiming,
     },
+    /// CR 113.6 + CR 601.2a: Marker static identifying a source whose linked
+    /// "play a card from exile with a collection counter on it" permission is
+    /// live (Evelyn, the Covetous). Per CR 113.6, that play permission is a
+    /// static ability of the source and functions only while the source is on
+    /// the battlefield under the player's control; this marker is what
+    /// `casting.rs::source_has_collection_counter_play_permission` consults so
+    /// the per-card `CastingPermission::PlayFromExile` (collection-counter +
+    /// controller provenance) is honored only while a live source remains.
+    /// CR 601.2a: the permission authorizes moving a matching exiled card to
+    /// the stack / battlefield (playing it).
+    ///
+    /// Distinct from `ExileCastPermission`: that static is self-contained and
+    /// grants the cast itself, keyed on a source-identity exile pool. This is a
+    /// nullary marker; the actual permission lives on each exiled card as a
+    /// `CastingPermission::PlayFromExile`, linked by the collection counter
+    /// (not source identity), so the authority winks out if every source
+    /// leaves but the counter persists.
+    ///
+    /// RUNTIME: handled by direct match in
+    /// `casting.rs::source_has_collection_counter_play_permission`; coverage
+    /// support is via `is_data_carrying_static()` (mirrors the cast-permission
+    /// cluster, which is also runtime-by-direct-match, not registry-keyed).
+    LinkedCollectionCounterPlayPermission,
     /// CR 101.2: This spell/permanent can't be countered.
     CantBeCountered,
     /// CR 101.2 + CR 707.10: This spell can't be copied by spells or abilities.
@@ -1133,8 +1195,17 @@ pub enum StaticMode {
     /// The source controller is the goading player for the "attack another
     /// player if able" requirement.
     Goaded,
-    CantAttackAlone,
-    CantBlockAlone,
+    /// CR 506.5 + CR 508.1c + CR 509.1b: Parameterized "alone" combat
+    /// restriction.  `action` selects whether it applies to attacking or
+    /// blocking; `requirement` selects the polarity:
+    /// - `NeedsCompanion` → "can't attack/block alone" (Bonded Construct,
+    ///   Mogg Flunkies) — the creature must NOT be the sole attacker/blocker.
+    /// - `MustBeSole` → "can only attack alone" (Master of Cruelties) — the
+    ///   creature must BE the sole attacker; no companions allowed.
+    CombatAlone {
+        action: CombatAloneAction,
+        requirement: CombatAloneRequirement,
+    },
     /// CR 702.122c: This creature can't crew Vehicles.
     CantCrew,
     /// CR 702.122c / CR 702.171a / CR 702.184a: This creature contributes to a
@@ -1268,6 +1339,21 @@ pub enum StaticMode {
     /// CR 602.5a activation restriction is lifted, combat attacker validation
     /// (CR 508.1a) is untouched. Canonical card: Tyvar, Jubilant Brawler.
     CanActivateAbilitiesAsThoughHaste,
+    /// CR 509.1b + CR 609.4 + CR 702.28b: Per-source block permission that lifts
+    /// the shadow blocker-side restriction for the affected creature only — it may
+    /// block creatures with shadow despite not having shadow itself. Shadow is the
+    /// unique evasion keyword (CR 702.28b) with a symmetric "without-shadow can't
+    /// block with-shadow" pairing, so this is keyword-specific (mirrors
+    /// `CanAttackWithDefender`) rather than a generic keyword-parameterized form,
+    /// which would cross keyword CR sections with distinct runtime resolvers.
+    ///
+    /// Captures both printed phrasings of the same CR 509.1b outcome: "can block
+    /// creatures with shadow as though they didn't have shadow" (Heartwood Dryad)
+    /// and "can block creatures with shadow as though it had shadow" (Wall of
+    /// Diffusion). `affected: SelfRef` (per-source, not the global rule
+    /// modification `IgnoreLandwalkForBlocking` uses). Enforced inside the shadow
+    /// block-legality seam in `combat.rs`, not as a layer-6 keyword grant.
+    CanBlockShadow,
     /// CR 510.1a: This creature assigns no combat damage.
     /// Used for creatures like Ornithopter of Paradise and various Walls that can
     /// attack/block but deal 0 combat damage.
@@ -1343,6 +1429,7 @@ impl Hash for StaticMode {
             StaticMode::MaxAttackersEachCombat { max }
             | StaticMode::MaxBlockersEachCombat { max } => max.hash(state),
             StaticMode::RevealTopOfLibrary { all_players } => all_players.hash(state),
+            StaticMode::RevealHand { who } => who.hash(state),
             StaticMode::CantBeBlockedExceptBy { kind } => match kind {
                 // TargetFilter does not implement Hash; discriminant only.
                 BlockExceptionKind::Quality(_) => {}
@@ -1403,6 +1490,7 @@ impl Hash for StaticMode {
             // Data-carrying variants with non-Hash fields: discriminant only.
             // These are never used as HashMap keys (handled by is_data_carrying_static).
             StaticMode::ModifyCost { .. }
+            | StaticMode::ImposeAdditionalCost { .. }
             | StaticMode::CantPayCost { .. }
             | StaticMode::DefilerCostReduction { .. }
             | StaticMode::CantDraw { .. }
@@ -1456,6 +1544,7 @@ impl StaticMode {
             | StaticMode::CastWithAlternativeCost { .. }
             | StaticMode::AlternativeKeywordCost { .. }
             | StaticMode::ModifyCost { .. }
+            | StaticMode::ImposeAdditionalCost { .. }
             | StaticMode::ReduceAbilityCost { .. }
             | StaticMode::ModifyActivationLimit { .. }
             | StaticMode::ActivateAsInstant { .. }
@@ -1472,6 +1561,7 @@ impl StaticMode {
             | StaticMode::IgnoreHexproof
             | StaticMode::ExtraBlockers { .. }
             | StaticMode::RevealTopOfLibrary { .. }
+            | StaticMode::RevealHand { .. }
             | StaticMode::GraveyardCastPermission { .. }
             | StaticMode::TopOfLibraryCastPermission { .. }
             | StaticMode::CastFromHandFree { .. }
@@ -1499,8 +1589,7 @@ impl StaticMode {
             | StaticMode::MustBeBlocked
             | StaticMode::MustBeBlockedByAll
             | StaticMode::Goaded
-            | StaticMode::CantAttackAlone
-            | StaticMode::CantBlockAlone
+            | StaticMode::CombatAlone { .. }
             | StaticMode::CantCrew
             | StaticMode::CrewContribution { .. }
             | StaticMode::MayLookAtTopOfLibrary
@@ -1524,9 +1613,11 @@ impl StaticMode {
             | StaticMode::CanAttackWithDefender
             | StaticMode::IgnoreLandwalkForBlocking { .. }
             | StaticMode::CanActivateAbilitiesAsThoughHaste
+            | StaticMode::CanBlockShadow
             | StaticMode::AssignNoCombatDamage
             | StaticMode::UntapsDuringEachOtherPlayersUntapStep
             | StaticMode::EntersWithAdditionalCounters { .. }
+            | StaticMode::LinkedCollectionCounterPlayPermission
             | StaticMode::Other(_) => None,
         }
     }
@@ -1571,6 +1662,9 @@ impl fmt::Display for StaticMode {
                 CostModifyMode::Reduce => write!(f, "ReduceCost"),
                 CostModifyMode::Raise => write!(f, "RaiseCost"),
                 CostModifyMode::Minimum => write!(f, "MinimumCost"),
+            },
+            StaticMode::ImposeAdditionalCost { action, .. } => match action {
+                AdditionalCostTaxAction::Cast => write!(f, "ImposeAdditionalCastCost"),
             },
             StaticMode::ReduceAbilityCost {
                 keyword,
@@ -1692,6 +1786,7 @@ impl fmt::Display for StaticMode {
                     write!(f, "RevealTopOfLibrary(you)")
                 }
             }
+            StaticMode::RevealHand { who } => write!(f, "RevealHand({who})"),
             // Tier 1
             StaticMode::CantBeBlocked => write!(f, "CantBeBlocked"),
             StaticMode::CantBeBlockedExceptBy { kind } => match kind {
@@ -1736,8 +1831,20 @@ impl fmt::Display for StaticMode {
             StaticMode::MustBeBlocked => write!(f, "MustBeBlocked"),
             StaticMode::MustBeBlockedByAll => write!(f, "MustBeBlockedByAll"),
             StaticMode::Goaded => write!(f, "Goaded"),
-            StaticMode::CantAttackAlone => write!(f, "CantAttackAlone"),
-            StaticMode::CantBlockAlone => write!(f, "CantBlockAlone"),
+            StaticMode::CombatAlone {
+                action,
+                requirement,
+            } => {
+                let a = match action {
+                    CombatAloneAction::Attack => "Attack",
+                    CombatAloneAction::Block => "Block",
+                };
+                let r = match requirement {
+                    CombatAloneRequirement::NeedsCompanion => "NeedsCompanion",
+                    CombatAloneRequirement::MustBeSole => "MustBeSole",
+                };
+                write!(f, "CombatAlone({a},{r})")
+            }
             StaticMode::CantCrew => write!(f, "CantCrew"),
             // Debug format, one-way (mirrors CantBeBlockedBy). No from_str reconstruction.
             StaticMode::CrewContribution { kind, actions } => {
@@ -1791,6 +1898,7 @@ impl fmt::Display for StaticMode {
             StaticMode::CanActivateAbilitiesAsThoughHaste => {
                 write!(f, "CanActivateAbilitiesAsThoughHaste")
             }
+            StaticMode::CanBlockShadow => write!(f, "CanBlockShadow"),
             StaticMode::AssignNoCombatDamage => write!(f, "AssignNoCombatDamage"),
             StaticMode::UntapsDuringEachOtherPlayersUntapStep => {
                 write!(f, "UntapsDuringEachOtherPlayersUntapStep")
@@ -1802,6 +1910,9 @@ impl fmt::Display for StaticMode {
                 count,
             } => {
                 write!(f, "EntersWithAdditionalCounters({counter_type:?},{count})")
+            }
+            StaticMode::LinkedCollectionCounterPlayPermission => {
+                write!(f, "LinkedCollectionCounterPlayPermission")
             }
             // Fallback
             StaticMode::Other(s) => write!(f, "{s}"),
@@ -1818,6 +1929,9 @@ impl FromStr for StaticMode {
             "CantAttack" => StaticMode::CantAttack,
             "CantBlock" => StaticMode::CantBlock,
             "CantAttackOrBlock" => StaticMode::CantAttackOrBlock,
+            "LinkedCollectionCounterPlayPermission" => {
+                StaticMode::LinkedCollectionCounterPlayPermission
+            }
             s if parse_static_mode_u32_arg(s, "MaxAttackersEachCombat").is_some() => {
                 StaticMode::MaxAttackersEachCombat {
                     max: parse_static_mode_u32_arg(s, "MaxAttackersEachCombat").unwrap(),
@@ -2081,8 +2195,18 @@ impl FromStr for StaticMode {
             "MustBeBlocked" => StaticMode::MustBeBlocked,
             "MustBeBlockedByAll" => StaticMode::MustBeBlockedByAll,
             "Goaded" => StaticMode::Goaded,
-            "CantAttackAlone" => StaticMode::CantAttackAlone,
-            "CantBlockAlone" => StaticMode::CantBlockAlone,
+            "CombatAlone(Attack,NeedsCompanion)" => StaticMode::CombatAlone {
+                action: CombatAloneAction::Attack,
+                requirement: CombatAloneRequirement::NeedsCompanion,
+            },
+            "CombatAlone(Block,NeedsCompanion)" => StaticMode::CombatAlone {
+                action: CombatAloneAction::Block,
+                requirement: CombatAloneRequirement::NeedsCompanion,
+            },
+            "CombatAlone(Attack,MustBeSole)" => StaticMode::CombatAlone {
+                action: CombatAloneAction::Attack,
+                requirement: CombatAloneRequirement::MustBeSole,
+            },
             "CantCrew" => StaticMode::CantCrew,
             "MayLookAtTopOfLibrary" => StaticMode::MayLookAtTopOfLibrary,
             // Tier 3
@@ -2108,6 +2232,7 @@ impl FromStr for StaticMode {
                 StaticMode::IgnoreLandwalkForBlocking { qualifier: None }
             }
             "CanActivateAbilitiesAsThoughHaste" => StaticMode::CanActivateAbilitiesAsThoughHaste,
+            "CanBlockShadow" => StaticMode::CanBlockShadow,
             s if s.starts_with("StepEndUnspentMana(") => StaticMode::Other(s.to_string()),
             "UntapsDuringEachOtherPlayersUntapStep" => {
                 StaticMode::UntapsDuringEachOtherPlayersUntapStep
@@ -2268,6 +2393,14 @@ impl FromStr for StaticMode {
                     StaticMode::RevealTopOfLibrary {
                         all_players: rest == "all",
                     }
+                } else if let Some(inner) = other
+                    .strip_prefix("RevealHand(")
+                    .and_then(|s| s.strip_suffix(')'))
+                {
+                    if let Ok(who) = ProhibitionScope::from_str(inner) {
+                        return Ok(StaticMode::RevealHand { who });
+                    }
+                    return Ok(StaticMode::Other(other.to_string()));
                 } else if let Some(rest) = other.strip_prefix("AdditionalLandDrop(") {
                     let rest = rest.strip_suffix(')').unwrap_or(rest);
                     StaticMode::AdditionalLandDrop {
@@ -2542,6 +2675,12 @@ mod tests {
             StaticMode::CantBeBlockedByMoreThan { max: 2 },
             StaticMode::RevealTopOfLibrary { all_players: false },
             StaticMode::RevealTopOfLibrary { all_players: true },
+            StaticMode::RevealHand {
+                who: ProhibitionScope::Opponents,
+            },
+            StaticMode::RevealHand {
+                who: ProhibitionScope::AllPlayers,
+            },
             // Tier 1: keyword/evasion statics
             StaticMode::CantBeBlocked,
             StaticMode::CantBeBlockedExceptBy {
@@ -2564,8 +2703,18 @@ mod tests {
             StaticMode::CantTap,
             StaticMode::CantUntap,
             StaticMode::MustBeBlocked,
-            StaticMode::CantAttackAlone,
-            StaticMode::CantBlockAlone,
+            StaticMode::CombatAlone {
+                action: CombatAloneAction::Attack,
+                requirement: CombatAloneRequirement::NeedsCompanion,
+            },
+            StaticMode::CombatAlone {
+                action: CombatAloneAction::Block,
+                requirement: CombatAloneRequirement::NeedsCompanion,
+            },
+            StaticMode::CombatAlone {
+                action: CombatAloneAction::Attack,
+                requirement: CombatAloneRequirement::MustBeSole,
+            },
             StaticMode::CantCrew,
             StaticMode::MayLookAtTopOfLibrary,
             // Tier 3: parser-produced statics

@@ -134,7 +134,7 @@ pub(super) fn try_parse_token(_lower: &str, text: &str, ctx: &mut ParseContext) 
         .map(|(_, rest)| rest)
         .unwrap_or(&text)
         .trim();
-    let token = parse_token_description(after)?;
+    let token = parse_token_description_with_context(after, ctx)?;
     Some(Effect::Token {
         name: token.name,
         power: token.power.unwrap_or(PtValue::Fixed(0)),
@@ -266,6 +266,13 @@ fn parse_token_except_boundary(input: &str) -> OracleResult<'_, &str> {
 }
 
 pub(crate) fn parse_token_description(text: &str) -> Option<TokenDescription> {
+    parse_token_description_with_context(text, &ParseContext::default())
+}
+
+fn parse_token_description_with_context(
+    text: &str,
+    ctx: &ParseContext,
+) -> Option<TokenDescription> {
     let text = text.trim().trim_end_matches('.');
     let lower = text.to_lowercase();
 
@@ -373,11 +380,49 @@ pub(crate) fn parse_token_description(text: &str) -> Option<TokenDescription> {
             (None, None, rest)
         };
 
-    let (colors, rest) = parse_token_color_prefix(rest);
+    let (mut colors, rest) = parse_token_color_prefix(rest);
     let (descriptor, suffix) = split_token_head(rest)?;
     let (name_override, suffix) = parse_token_name_clause(suffix);
-    let keywords = parse_token_keyword_clause(suffix);
-    let (mut name, types) = parse_token_identity(descriptor)?;
+    // CR 105.1 + CR 105.2: "that's all colors" (Mechtitan Core, etc.) makes the
+    // token each of the five colors. Strip the clause before keyword parsing so
+    // the trailing keyword ("... and haste that's all colors") still survives,
+    // then set the colors.
+    let saved_all_colors_where_x_expr = extract_token_where_x_expression(suffix);
+    let (suffix, is_all_colors) = strip_token_all_colors_suffix(suffix);
+    if is_all_colors {
+        colors = ManaColor::ALL.to_vec();
+    }
+    let mut keywords = parse_token_keyword_clause(suffix);
+    let (mut name, types) = parse_token_identity(descriptor, ctx.card_name.as_deref())?;
+
+    // CR 111.4 + CR 111.1: When the token is a registry-defined named token
+    // (descriptor is a bare catalog name such as "Vibranium" / "Mutavault" with
+    // no inline core type), fill its catalog body characteristics — power,
+    // toughness, colors, keywords — that the effect text didn't already
+    // specify. CR 111.10 lets the creating effect modify/add to predefined
+    // characteristics, so inline P/T, colors, and keywords from the Oracle text
+    // take precedence and are never overwritten. The lookup keys on the bare
+    // descriptor, so type-bearing descriptors ("Soldier creature") never match
+    // a catalog `display_name` and are left untouched.
+    if let Some(body) = crate::game::token_presets::known_token_body_by_name_for_source(
+        descriptor,
+        ctx.card_name.as_deref(),
+    ) {
+        if power.is_none() {
+            power = body.power.map(PtValue::Fixed);
+        }
+        if toughness.is_none() {
+            toughness = body.toughness.map(PtValue::Fixed);
+        }
+        if colors.is_empty() {
+            colors = body.colors.clone();
+        }
+        for keyword in &body.keywords {
+            if !keywords.contains(keyword) {
+                keywords.push(keyword.clone());
+            }
+        }
+    }
 
     if let Some(name_override) = leading_name.or(name_override) {
         name = name_override;
@@ -386,7 +431,9 @@ pub(crate) fn parse_token_description(text: &str) -> Option<TokenDescription> {
     // CR 107.3: when the attacking clause was stripped and took the ", where X
     // is …" tail with it, `saved_where_x_expr` carries the expression; fall
     // back to it so the variable count is still resolved.
-    if let Some(where_expression) = extract_token_where_x_expression(suffix).or(saved_where_x_expr)
+    if let Some(where_expression) = extract_token_where_x_expression(suffix)
+        .or(saved_where_x_expr)
+        .or(saved_all_colors_where_x_expr)
     {
         // CR 107.3i + CR 117.1: The Token-effect `where X is …` rebind shares
         // the Join-Forces normalization path with non-Token effects via
@@ -568,6 +615,47 @@ fn strip_token_supertypes(mut text: &str) -> (Vec<Supertype>, &str) {
         }
         text = stripped;
     }
+}
+
+/// Strip a trailing "that's all colors" color clause from a token suffix.
+///
+/// CR 105.1 + CR 105.2: a token that is "all colors" is each of the five
+/// WUBRG colors. The clause appears as a relative-pronoun suffix on the token
+/// description (e.g. Mechtitan Core's "... and haste that's all colors" or a
+/// bare "... token that's all colors"), so it is detected by scanning word
+/// boundaries for the relative-pronoun variants followed by "all colors".
+/// Returns the suffix with the clause removed and a flag indicating whether it
+/// was present, so the caller can both set the five colors and keep the
+/// preceding keyword list intact.
+///
+/// Building block for the whole class of "create <token> ... that's all colors"
+/// effects, not just Mechtitan Core.
+fn strip_token_all_colors_suffix(text: &str) -> (&str, bool) {
+    fn all_colors_clause(i: &str) -> OracleResult<'_, ()> {
+        let (i, _) =
+            alt((tag("that's"), tag("that is"), tag("thats"), tag("that are"))).parse(i)?;
+        let (i, _) = value((), tag(" all colors")).parse(i)?;
+        let (i, _) = alt((value((), nom::combinator::eof), value((), tag(", where ")))).parse(i)?;
+        Ok((i, ()))
+    }
+
+    let lower = text.to_lowercase();
+    if all_colors_clause(&lower).is_ok() {
+        return ("", true);
+    }
+
+    for (pos, ch) in text.char_indices() {
+        if ch != ' ' {
+            continue;
+        }
+        let candidate = &text[pos + ch.len_utf8()..];
+        let candidate_lower = candidate.to_lowercase();
+        if all_colors_clause(&candidate_lower).is_ok() {
+            return (text[..pos].trim_end(), true);
+        }
+    }
+
+    (text, false)
 }
 
 fn parse_token_color_prefix(mut text: &str) -> (Vec<ManaColor>, &str) {
@@ -880,7 +968,10 @@ fn extract_token_pt_expression(text: &str) -> Option<String> {
     None
 }
 
-fn parse_token_identity(descriptor: &str) -> Option<(String, Vec<String>)> {
+fn parse_token_identity(
+    descriptor: &str,
+    source_name: Option<&str>,
+) -> Option<(String, Vec<String>)> {
     let mut core_types = Vec::new();
     let mut subtypes = Vec::new();
 
@@ -896,7 +987,7 @@ fn parse_token_identity(descriptor: &str) -> Option<(String, Vec<String>)> {
     }
 
     if core_types.is_empty() {
-        return known_named_token_identity(descriptor);
+        return known_named_token_identity(descriptor, source_name);
     }
 
     let name = if subtypes.is_empty() {
@@ -913,7 +1004,10 @@ fn parse_token_identity(descriptor: &str) -> Option<(String, Vec<String>)> {
     Some((name, types))
 }
 
-fn known_named_token_identity(descriptor: &str) -> Option<(String, Vec<String>)> {
+fn known_named_token_identity(
+    descriptor: &str,
+    source_name: Option<&str>,
+) -> Option<(String, Vec<String>)> {
     let lower = descriptor.trim().to_lowercase();
 
     // CR 303.7: Role tokens are Enchantment -- Aura Role tokens.
@@ -933,13 +1027,42 @@ fn known_named_token_identity(descriptor: &str) -> Option<(String, Vec<String>)>
         "gold" => "Gold",
         "lander" => "Lander",
         "mutagen" => "Mutagen",
-        _ => return None,
+        // CR 111.4: Any other named token (Vibranium, Mutavault, …) whose
+        // identity is catalogued in the predefined-token registry resolves to
+        // that catalog body. This generalizes the hardcoded predefined-subtype
+        // list above to the entire registry-defined named-token class instead
+        // of an allowlist that drops every uncatalogued name to Unimplemented.
+        // The simple-artifact predefined subtypes above are kept inline so
+        // their canonical name/type-line is independent of catalog presence.
+        _ => return known_registry_token_identity(descriptor, source_name),
     };
 
     Some((
         name.to_string(),
         vec!["Artifact".to_string(), name.to_string()],
     ))
+}
+
+/// CR 111.4 + CR 111.1: Resolve a named token's `(display name, type strings)`
+/// from the predefined-token registry (`known-tokens.toml`). The type string
+/// list follows the parser convention used by [`parse_token_identity`]: core
+/// types first (in catalog order), then subtypes. Returns `None` for names not
+/// present in the catalog, leaving the token unparsed (Unimplemented) as before.
+fn known_registry_token_identity(
+    descriptor: &str,
+    source_name: Option<&str>,
+) -> Option<(String, Vec<String>)> {
+    let body =
+        crate::game::token_presets::known_token_body_by_name_for_source(descriptor, source_name)?;
+    let mut types: Vec<String> = body
+        .core_types
+        .iter()
+        .map(|core| core.to_string())
+        .collect();
+    for subtype in &body.subtypes {
+        push_unique_string(&mut types, subtype);
+    }
+    Some((body.display_name.clone(), types))
 }
 
 /// CR 303.7: Role tokens are predefined Enchantment -- Aura Role tokens with
@@ -970,6 +1093,28 @@ fn known_role_token_identity(descriptor: &str) -> Option<(String, Vec<String>)> 
     ))
 }
 
+/// Strip trailing dynamic/attachment clauses from a token "with …" keyword phrase.
+fn strip_token_keyword_clause_suffixes(text: &str) -> &str {
+    let mut clause = text;
+    if let Ok((_, head)) = take_until::<_, _, nom::error::Error<&str>>("\"").parse(clause) {
+        clause = head;
+    }
+    for marker in [" where ", " equal to ", " attached "] {
+        clause = truncate_token_keyword_clause_before(clause, marker);
+    }
+    clause
+}
+
+/// Strip a token keyword clause at the first `marker` (e.g. `" equal to "`).
+fn truncate_token_keyword_clause_before<'a>(text: &'a str, marker: &str) -> &'a str {
+    let lower = text.to_ascii_lowercase();
+    let head_len = match take_until::<_, _, nom::error::Error<&str>>(marker).parse(&lower) {
+        Ok((rest, _)) => lower.len() - rest.len(),
+        Err(_) => return text,
+    };
+    &text[..head_len]
+}
+
 pub(super) fn parse_token_keyword_clause(text: &str) -> Vec<Keyword> {
     let trimmed = text.trim_start();
     let trimmed_lower = trimmed.to_lowercase();
@@ -979,16 +1124,7 @@ pub(super) fn parse_token_keyword_clause(text: &str) -> Vec<Keyword> {
         return Vec::new();
     };
 
-    let raw_clause = after_with
-        .split('"')
-        .next()
-        .unwrap_or(after_with)
-        .split(" where ")
-        .next()
-        .unwrap_or(after_with)
-        .split(" attached ")
-        .next()
-        .unwrap_or(after_with)
+    let raw_clause = strip_token_keyword_clause_suffixes(after_with)
         .trim()
         .trim_end_matches('.')
         .trim_end_matches(',')
@@ -1419,6 +1555,82 @@ mod tests {
         assert_eq!(kws, vec![Keyword::Flying]);
     }
 
+    /// Issue #2854 (Broodspinner): "with flying equal to …" must not treat the
+    /// count clause as part of the keyword name.
+    #[test]
+    fn keyword_clause_with_equal_to_count_suffix() {
+        let kws = parse_token_keyword_clause(
+            "with flying equal to the number of card types among cards in your graveyard",
+        );
+        assert_eq!(kws, vec![Keyword::Flying]);
+    }
+
+    #[test]
+    fn keyword_clause_keeps_numbered_keyword_before_quoted_static() {
+        let kws = parse_token_keyword_clause(r#"with toxic 1 and "This token can't block.""#);
+        assert_eq!(kws, vec![Keyword::Toxic(1)]);
+    }
+
+    #[test]
+    fn broodspinner_insect_tokens_with_flying_equal_to_count() {
+        let text = "Create a number of 1/1 black and green Insect creature tokens with flying equal to the number of card types among cards in your graveyard.";
+        let effect = try_parse_token(text, text, &mut ParseContext::default())
+            .expect("Broodspinner token line must parse");
+        match effect {
+            crate::types::ability::Effect::Token { keywords, .. } => {
+                assert!(
+                    keywords.contains(&Keyword::Flying),
+                    "flying insect tokens must carry Flying, got {keywords:?}"
+                );
+            }
+            other => panic!("expected Token effect, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn keyword_clause_keeps_keyword_before_all_colors_clause() {
+        // CR 105.1/105.2 + CR 702.10: the "that's all colors" clause is stripped
+        // before keyword parsing so the trailing keyword survives.
+        let (suffix, is_all_colors) =
+            strip_token_all_colors_suffix("with flying and haste that's all colors");
+        assert!(is_all_colors, "'that's all colors' must be detected");
+        assert_eq!(suffix, "with flying and haste");
+        let kws = parse_token_keyword_clause(suffix);
+        assert_eq!(kws, vec![Keyword::Flying, Keyword::Haste]);
+    }
+
+    #[test]
+    fn all_colors_suffix_relative_pronoun_variants() {
+        // CR 105.1/105.2: each relative-pronoun variant of the all-colors clause
+        // is recognized; non-color "that's" clauses are left untouched.
+        for clause in [
+            "that's all colors",
+            "with flying that's all colors",
+            "with flying that is all colors",
+            "with flying thats all colors",
+            "with flying that are all colors",
+        ] {
+            let (suffix, is_all_colors) = strip_token_all_colors_suffix(clause);
+            assert!(is_all_colors, "must detect all-colors in {clause:?}");
+            if clause == "that's all colors" {
+                assert_eq!(suffix, "");
+            } else {
+                assert_eq!(suffix, "with flying");
+            }
+        }
+        let (suffix, is_all_colors) =
+            strip_token_all_colors_suffix("with flying that's all colors, where X is that value");
+        assert!(is_all_colors);
+        assert_eq!(suffix, "with flying");
+        let (suffix, is_all_colors) =
+            strip_token_all_colors_suffix("with flying that's all colors and haste");
+        assert!(!is_all_colors);
+        assert_eq!(suffix, "with flying that's all colors and haste");
+        let (suffix, is_all_colors) = strip_token_all_colors_suffix("with flying");
+        assert!(!is_all_colors);
+        assert_eq!(suffix, "with flying");
+    }
+
     #[test]
     fn extract_static_cant_block_from_quoted_ability() {
         use crate::types::ability::TargetFilter;
@@ -1710,5 +1922,242 @@ mod tests {
             ),
             "X count must resolve to CountersOn(Source, P1P1), got {count:?}"
         );
+    }
+
+    /// CR 111.3 + CR 702.10 (Haste) + CR 105.1/105.2 (all five colors):
+    /// Mechtitan Core's token has a "with <keywords> that's all colors" suffix
+    /// where the "that's all colors" color clause trails the keyword list. The
+    /// final keyword ("haste") and the all-five-colors characteristic must both
+    /// survive parsing. Building-block regression for the whole class of
+    /// "create <token> with <keywords> that's all colors" effects.
+    #[test]
+    fn token_with_keywords_then_thats_all_colors_keeps_haste_and_colors() {
+        use crate::types::mana::ManaColor;
+
+        let text = "create mechtitan, a legendary 10/10 construct artifact creature token with flying, vigilance, trample, lifelink, and haste that's all colors";
+        let effect = try_parse_token(
+            text,
+            "Create Mechtitan, a legendary 10/10 Construct artifact creature token with flying, vigilance, trample, lifelink, and haste that's all colors",
+            &mut ParseContext::default(),
+        )
+        .expect("expected Token effect");
+        let Effect::Token {
+            keywords, colors, ..
+        } = effect
+        else {
+            panic!("expected Token effect, got {effect:?}");
+        };
+        assert!(
+            keywords.contains(&Keyword::Haste),
+            "the trailing keyword before \"that's all colors\" must survive: {keywords:?}",
+        );
+        for keyword in [
+            Keyword::Flying,
+            Keyword::Vigilance,
+            Keyword::Trample,
+            Keyword::Lifelink,
+        ] {
+            assert!(
+                keywords.contains(&keyword),
+                "{keyword:?} must be present: {keywords:?}",
+            );
+        }
+        for color in ManaColor::ALL {
+            assert!(
+                colors.contains(&color),
+                "\"that's all colors\" must set {color:?}: {colors:?}",
+            );
+        }
+        assert_eq!(
+            colors.len(),
+            5,
+            "all-colors must be exactly the five WUBRG colors: {colors:?}",
+        );
+    }
+
+    /// CR 111.3 + CR 105.1/105.2: the all-colors clause may be the whole token
+    /// suffix, without a preceding `with <keyword>` list.
+    #[test]
+    fn token_thats_all_colors_without_keywords_sets_colors() {
+        use crate::types::mana::ManaColor;
+
+        let text = "create a 2/2 elemental creature token that's all colors";
+        let effect = try_parse_token(
+            text,
+            "Create a 2/2 Elemental creature token that's all colors",
+            &mut ParseContext::default(),
+        )
+        .expect("expected Token effect");
+        let Effect::Token {
+            colors, keywords, ..
+        } = effect
+        else {
+            panic!("expected Token effect, got {effect:?}");
+        };
+        assert!(keywords.is_empty());
+        assert_eq!(colors, ManaColor::ALL.to_vec());
+    }
+
+    /// CR 105.1/105.2 + CR 107.3: stripping the all-colors suffix must not drop
+    /// the trailing `where X is ...` binding for variable token counts.
+    #[test]
+    fn token_all_colors_where_clause_keeps_x_binding() {
+        use crate::types::mana::ManaColor;
+
+        let text = "Create X 1/1 Stained Glass artifact creature tokens that are all colors, where X is the number of creatures you control";
+        let effect = try_parse_token(&text.to_lowercase(), text, &mut ParseContext::default())
+            .expect("expected Token effect");
+        let Effect::Token { colors, count, .. } = effect else {
+            panic!("expected Token effect, got {effect:?}");
+        };
+        assert_eq!(colors, ManaColor::ALL.to_vec());
+        let QuantityExpr::Ref {
+            qty:
+                QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(tf),
+                },
+        } = count
+        else {
+            panic!("expected where-clause to bind X to an ObjectCount, got {count:?}");
+        };
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(
+            tf.type_filters.contains(&TypeFilter::Creature),
+            "X must count controlled creatures, got {:?}",
+            tf.type_filters
+        );
+    }
+
+    /// CR 111.4 + CR 111.1: A registry-defined named token (here the Mutavault
+    /// land token) parses to a complete `Effect::Token` sourced from the
+    /// predefined-token catalog, instead of dropping to `Effect::Unimplemented`.
+    /// Verifies the registry building block (`known_token_body_by_name`) covers
+    /// the whole class of catalog named tokens, not a hardcoded allowlist.
+    #[test]
+    fn registry_named_land_token_parses_with_tapped() {
+        let text = "Create a tapped Mutavault token.";
+        let effect = try_parse_token(&text.to_lowercase(), text, &mut ParseContext::default())
+            .expect("registry named token must parse, not Unimplemented");
+        let Effect::Token {
+            name,
+            types,
+            power,
+            toughness,
+            tapped,
+            count,
+            ..
+        } = effect
+        else {
+            panic!("expected Token effect, got {effect:?}");
+        };
+        assert_eq!(name, "Mutavault");
+        assert_eq!(types, vec!["Land".to_string()]);
+        // CR 110.5b + CR 603.6d: the leading "tapped " word still flows through.
+        assert!(tapped, "leading 'tapped' must set tapped=true");
+        // CR 208.3: a noncreature (Land) token has no power/toughness; the
+        // create-token default of 0/0 applies.
+        assert_eq!(power, PtValue::Fixed(0));
+        assert_eq!(toughness, PtValue::Fixed(0));
+        assert!(matches!(count, QuantityExpr::Fixed { value: 1 }));
+    }
+
+    /// CR 111.4 + CR 111.1 + CR 208.1: A registry-defined named *creature* token
+    /// (Ajani's Pridemate) fills its catalog power/toughness, color, and types
+    /// from the registry body when the Oracle text omits them. Previously the
+    /// missing P/T forced the parse to bail (a creature with no P/T returns
+    /// None) and the card dropped to Unimplemented.
+    #[test]
+    fn registry_named_creature_token_fills_body_from_catalog() {
+        use crate::types::mana::ManaColor;
+
+        let text = "Create an Ajani's Pridemate token.";
+        let effect = try_parse_token(&text.to_lowercase(), text, &mut ParseContext::default())
+            .expect("registry named creature token must parse, not Unimplemented");
+        let Effect::Token {
+            name,
+            types,
+            power,
+            toughness,
+            colors,
+            ..
+        } = effect
+        else {
+            panic!("expected Token effect, got {effect:?}");
+        };
+        assert_eq!(name, "Ajani's Pridemate");
+        assert!(
+            types.contains(&"Creature".to_string())
+                && types.contains(&"Cat".to_string())
+                && types.contains(&"Soldier".to_string()),
+            "catalog core type + subtypes must flow through, got {types:?}"
+        );
+        // CR 111.10: catalog characteristics fill in for text the effect omitted.
+        assert_eq!(power, PtValue::Fixed(2));
+        assert_eq!(toughness, PtValue::Fixed(2));
+        assert_eq!(colors, vec![ManaColor::White]);
+    }
+
+    /// CR 111.1 + CR 111.4 + CR 208.1: ordinary subtype display names are not
+    /// token identities when the registry has multiple distinct bodies for the
+    /// same name. The Oracle text must supply the missing body characteristics
+    /// ("2/2 green Bear creature", "4/4 white Angel creature with flying", etc.)
+    /// instead of inheriting whichever catalog entry appears first.
+    #[test]
+    fn ambiguous_registry_subtype_name_does_not_guess_body() {
+        use crate::types::mana::ManaColor;
+
+        assert!(
+            crate::game::token_presets::known_token_body_by_name("Bear").is_none(),
+            "Bear has multiple catalog bodies and must not pick the first one"
+        );
+
+        let text = "Create a Bear token.";
+        assert!(
+            try_parse_token(&text.to_lowercase(), text, &mut ParseContext::default()).is_none(),
+            "a bare ambiguous subtype name must remain unsupported until Oracle text supplies P/T"
+        );
+
+        let mut ctx = ParseContext {
+            card_name: Some("The Earth King".to_string()),
+            ..ParseContext::default()
+        };
+        let effect = try_parse_token(&text.to_lowercase(), text, &mut ctx)
+            .expect("source-scoped Bear token must resolve through the catalog");
+        let Effect::Token {
+            name,
+            types,
+            power,
+            toughness,
+            colors,
+            ..
+        } = effect
+        else {
+            panic!("expected Token effect, got {effect:?}");
+        };
+        assert_eq!(name, "Bear");
+        assert_eq!(types, vec!["Creature".to_string(), "Bear".to_string()]);
+        assert_eq!(power, PtValue::Fixed(4));
+        assert_eq!(toughness, PtValue::Fixed(4));
+        assert_eq!(colors, vec![ManaColor::Green]);
+    }
+
+    /// CR 111.10: The hardcoded predefined-subtype tokens (Treasure, Food, …)
+    /// must keep resolving to their canonical artifact identity even though the
+    /// registry fallthrough was added — no regression for the existing class.
+    #[test]
+    fn predefined_subtype_tokens_still_resolve() {
+        for (descriptor, expected) in [
+            (
+                "Treasure",
+                vec!["Artifact".to_string(), "Treasure".to_string()],
+            ),
+            ("Food", vec!["Artifact".to_string(), "Food".to_string()]),
+            ("Clue", vec!["Artifact".to_string(), "Clue".to_string()]),
+        ] {
+            let (name, types) = known_named_token_identity(descriptor, None)
+                .expect("predefined subtype must resolve");
+            assert_eq!(name, descriptor);
+            assert_eq!(types, expected);
+        }
     }
 }

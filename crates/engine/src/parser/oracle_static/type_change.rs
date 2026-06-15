@@ -211,10 +211,8 @@ pub(crate) fn parse_collection_counter_play_permission_static(
     })?;
 
     Some(
-        StaticDefinition::new(StaticMode::Other(
-            "LinkedCollectionCounterPlayPermission".to_string(),
-        ))
-        .description(description.to_string()),
+        StaticDefinition::new(StaticMode::LinkedCollectionCounterPlayPermission)
+            .description(description.to_string()),
     )
 }
 
@@ -643,6 +641,39 @@ pub(crate) fn parse_enchanted_is_type(
             }
         }
 
+        // CR 305.7: If a non-additive type-changing Aura sets exactly one
+        // basic land subtype, keep the card-type replacement ("is a ... land")
+        // and use SetBasicLandType instead of AddSubtype so the land-subtype
+        // change removes rules-text abilities and old land subtypes.
+        if !is_additive && granted_core_types == vec![CoreType::Land] && granted_subtypes.len() == 1
+        {
+            if let Some(basic_type) = parse_basic_land_type(&granted_subtypes[0].to_lowercase()) {
+                let affected = TargetFilter::Typed(
+                    TypedFilter::new(perm_tf).properties(vec![FilterProp::EnchantedBy]),
+                );
+                let mut mods = modifications;
+                mods.push(ContinuousModification::SetCardTypes {
+                    core_types: granted_core_types,
+                });
+                if let Some(color) = opt_color {
+                    mods.push(ContinuousModification::SetColor {
+                        colors: vec![color],
+                    });
+                } else if is_colorless {
+                    mods.push(ContinuousModification::SetColor { colors: vec![] });
+                }
+                mods.push(ContinuousModification::SetBasicLandType {
+                    land_type: basic_type,
+                });
+                return Some(
+                    StaticDefinition::continuous()
+                        .affected(affected)
+                        .modifications(mods)
+                        .description(description.to_string()),
+                );
+            }
+        }
+
         // This branch handles type-*changing* auras that grant at least one
         // core card type ("is an Insect artifact creature ..."). A bare
         // "is a [land subtype]" ("Enchanted land is a Mountain") grants no
@@ -940,23 +971,39 @@ pub(crate) fn parse_pronoun_becomes_type_static(
     tp: &TextPair<'_>,
     text: &str,
 ) -> Option<StaticDefinition> {
+    // STEP A.0 — peel an optional leading "during your turn, " timing clause.
+    // Mirror of `parse_compound_turn_counter_animation` (anthem.rs): the
+    // alternate printing convention writes the turn restriction as a leading
+    // timing prefix ("During your turn, ~ is a 4/4 ...") rather than a trailing
+    // "as long as it's your turn" clause. The peel is Option-returning, so when
+    // absent it falls through to `*tp` unchanged and no condition is attached.
+    let (tp, turn_condition) = match nom_tag_tp(tp, "during your turn, ") {
+        Some(rest) => (rest, Some(StaticCondition::DuringYourTurn)),
+        None => (*tp, None),
+    };
+
     // STEP A — peel a trailing " as long as <condition>" FIRST. The canonical
     // inverted-form rewrite produces "<effect> as long as <condition>"; the
     // condition must come off before the effect is parsed, or it leaks into
     // the " with " tail and never becomes a StaticCondition.
     let (effect_tp, condition_tp) = match tp.split_around(" as long as ") {
         Some((before, after)) => (before, Some(after)),
-        None => (*tp, None),
+        None => (tp, None),
     };
 
     // STEP B — pronoun + article prefix. Accept gender-neutral ("it's", "~'s",
     // "they're") and gendered ("he's", "she's") pronouns; planeswalker
     // animation statics use gendered pronouns (Grand Master of Flowers, Kaito,
-    // Gideon classes).
+    // Gideon classes). Also accept the bare "is"-copula form ("~ is a/an ...")
+    // produced when an inverted "As long as it's your turn, ~ is a ..." line
+    // (Gideon Blackblade, #1155) is split by `parse_conditional_static` and the
+    // pronoun-less effect clause "~ is a 4/4 ..." re-enters this parser.
     let body = nom_tag_tp(&effect_tp, "it's a ")
         .or_else(|| nom_tag_tp(&effect_tp, "it's an "))
         .or_else(|| nom_tag_tp(&effect_tp, "~'s a "))
         .or_else(|| nom_tag_tp(&effect_tp, "~'s an "))
+        .or_else(|| nom_tag_tp(&effect_tp, "~ is a "))
+        .or_else(|| nom_tag_tp(&effect_tp, "~ is an "))
         .or_else(|| nom_tag_tp(&effect_tp, "they're a "))
         .or_else(|| nom_tag_tp(&effect_tp, "they're an "))
         .or_else(|| nom_tag_tp(&effect_tp, "he's a "))
@@ -995,17 +1042,35 @@ pub(crate) fn parse_pronoun_becomes_type_static(
         return None;
     }
 
-    // STEP D — attach the condition peeled in STEP A.
+    // STEP D — attach the condition(s). The leading "during your turn, " timing
+    // peel (STEP A.0) and the trailing " as long as <cond>" peel (STEP A) are
+    // independent; either, both, or neither may be present.
+    // CR 205.1b + CR 613.7: "~ is a [P/T] [types] creature ... that's still a
+    // planeswalker" — additive type-change (AddType is non-replacing, so the
+    // permanent retains its Planeswalker type while it is also a creature).
+    let trailing_condition = condition_tp.map(|cond_tp| {
+        let cond_text = cond_tp.original.trim().trim_end_matches('.');
+        parse_static_condition(cond_text).unwrap_or(StaticCondition::Unrecognized {
+            text: cond_text.to_string(),
+        })
+    });
+    let condition = match (turn_condition, trailing_condition) {
+        // CR 611.3a: when both a leading turn restriction and a trailing
+        // "as long as" condition are present, compose via `And` rather than
+        // dropping one (mirrors `parse_conditional_static` in anthem.rs).
+        (Some(turn), Some(inner)) => Some(StaticCondition::And {
+            conditions: vec![turn, inner],
+        }),
+        (Some(turn), None) => Some(turn),
+        (None, Some(inner)) => Some(inner),
+        (None, None) => None,
+    };
+
     let mut def = StaticDefinition::continuous()
         .affected(TargetFilter::SelfRef)
         .modifications(modifications)
         .description(text.to_string());
-    if let Some(cond_tp) = condition_tp {
-        let cond_text = cond_tp.original.trim().trim_end_matches('.');
-        let condition =
-            parse_static_condition(cond_text).unwrap_or(StaticCondition::Unrecognized {
-                text: cond_text.to_string(),
-            });
+    if let Some(condition) = condition {
         def = def.condition(condition);
     }
     Some(def)

@@ -20,8 +20,8 @@ use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
 
 use super::ability_utils::{
-    begin_target_selection_for_ability, build_target_slots, compute_unavailable_modes,
-    has_legal_target_assignment_for_ability, modal_choice_for_player,
+    begin_target_selection_for_ability, build_target_slots, cap_distribution_target_slots,
+    compute_unavailable_modes, has_legal_target_assignment_for_ability, modal_choice_for_player,
 };
 use super::casting;
 use super::casting_costs;
@@ -1281,6 +1281,16 @@ fn finalize_copy_retarget(
         // generic copy-spell choices whose completion source is the copy.
         source_id: effect_source_id.unwrap_or(copy_id),
     });
+    // CR 707.10c + CR 603.2: Copy observers (Magecraft) must drain only after
+    // the copy's targets are finalized, not while `CopyRetarget` is still open.
+    if let Some(wf) =
+        triggers::drain_deferred_triggers_after_stack_object_announcement(state, events)
+    {
+        state.waiting_for = wf;
+        state.priority_player = player;
+        effects::drain_pending_continuation(state, events);
+        return Ok(());
+    }
     state.waiting_for = WaitingFor::Priority { player };
     state.priority_player = player;
     effects::drain_pending_continuation(state, events);
@@ -2231,6 +2241,20 @@ fn apply_action(
                     &chosen,
                     &mut events,
                 )?,
+                // CR 601.2h + CR 701.13: Exile a battlefield permanent the player
+                // controls as an additional/alternative cost (Food Chain class).
+                PayCostKind::ExilePermanent { filter } => {
+                    engine_casting::handle_exile_permanent_for_cost(
+                        state,
+                        *player,
+                        filter.clone(),
+                        *pending_cast.clone(),
+                        *count,
+                        choices,
+                        &chosen,
+                        &mut events,
+                    )?
+                }
                 // CR 702.167a/b: Craft materials exile across the
                 // battlefield/graveyard union.
                 PayCostKind::ExileMaterials { materials } => {
@@ -2335,6 +2359,7 @@ fn apply_action(
                 PayCostKind::ReturnToHand
                 | PayCostKind::ExileFromZone { .. }
                 | PayCostKind::ExileMaterials { .. }
+                | PayCostKind::ExilePermanent { .. }
                 | PayCostKind::RemoveCounter { .. }
                 | PayCostKind::Behold { .. } => {
                     return Err(EngineError::InvalidAction(
@@ -2794,7 +2819,16 @@ fn apply_action(
                     let mut trial = pending.as_ref().clone();
                     trial.ability.set_chosen_x_recursive(value);
                     trial.cost.concretize_x(value);
-                    let target_slots = build_target_slots(state, &trial.ability)?;
+                    let mut target_slots = build_target_slots(state, &trial.ability)?;
+                    // CR 601.2c + CR 601.2d: clamp a divided spell's slots to the
+                    // (now-known) pool so the legal-assignment probe matches what
+                    // the controller will actually be offered (issue #2856).
+                    cap_distribution_target_slots(
+                        state,
+                        &trial.ability,
+                        trial.distribute.as_ref(),
+                        &mut target_slots,
+                    );
                     if !target_slots.is_empty()
                         && !has_legal_target_assignment_for_ability(
                             state,
@@ -3435,6 +3469,45 @@ fn apply_action(
                     attacker: *next,
                     remaining: rest.to_vec(),
                 }
+            } else if let Some(waiting_for) =
+                engine_combat::next_current_enlist_choice(state, *player)
+            {
+                waiting_for
+            } else {
+                engine_combat::finish_declare_attackers(state, &mut events, false)?
+            }
+        }
+        // CR 508.1g + CR 702.154a: the active player may tap up to one eligible
+        // creature for each Enlist instance as the source attacks. As with
+        // exert, declaration/tap/enlist triggers are deferred until all optional
+        // attack costs are decided.
+        (
+            WaitingFor::EnlistChoice {
+                player,
+                attacker,
+                eligible,
+                remaining,
+            },
+            GameAction::ChooseEnlist { target },
+        ) => {
+            triggers_processed_inline = true;
+            if state.priority_player
+                != turn_control::authorized_submitter_for_player(state, *player)
+            {
+                return Err(EngineError::NotYourPriority);
+            }
+            if let Some(target) = target {
+                if !eligible.contains(&target) {
+                    return Err(EngineError::InvalidAction(format!(
+                        "{target:?} is not an eligible Enlist target"
+                    )));
+                }
+                engine_combat::apply_attack_enlist(state, *attacker, target, &mut events)?;
+            }
+            if let Some(waiting_for) =
+                engine_combat::next_enlist_choice(state, *player, remaining.clone())
+            {
+                waiting_for
             } else {
                 engine_combat::finish_declare_attackers(state, &mut events, false)?
             }
@@ -4665,6 +4738,8 @@ fn apply_action(
             WaitingFor::RetargetChoice {
                 player,
                 stack_entry_index,
+                scope,
+                current_targets,
                 legal_new_targets,
                 ..
             },
@@ -4672,10 +4747,14 @@ fn apply_action(
         ) => apply_retarget(
             state,
             &mut events,
-            *player,
-            *stack_entry_index,
-            legal_new_targets,
-            new_targets,
+            RetargetSubmission {
+                player: *player,
+                stack_entry_index: *stack_entry_index,
+                scope,
+                current_targets,
+                legal_new_targets,
+                new_targets,
+            },
         )?,
         // CR 115.7: Retarget a single-target spell via a board click. The
         // universal `ChooseTarget` action — already consumed by every other
@@ -4687,6 +4766,7 @@ fn apply_action(
                 player,
                 stack_entry_index,
                 scope: RetargetScope::Single,
+                current_targets,
                 legal_new_targets,
                 ..
             },
@@ -4694,10 +4774,14 @@ fn apply_action(
         ) => apply_retarget(
             state,
             &mut events,
-            *player,
-            *stack_entry_index,
-            legal_new_targets,
-            vec![t],
+            RetargetSubmission {
+                player: *player,
+                stack_entry_index: *stack_entry_index,
+                scope: &RetargetScope::Single,
+                current_targets,
+                legal_new_targets,
+                new_targets: vec![t],
+            },
         )?,
         (waiting, action) => {
             return Err(EngineError::ActionNotAllowed(format!(
@@ -4752,6 +4836,15 @@ fn apply_action(
     })
 }
 
+struct RetargetSubmission<'a> {
+    player: PlayerId,
+    stack_entry_index: usize,
+    scope: &'a RetargetScope,
+    current_targets: &'a [TargetRef],
+    legal_new_targets: &'a [TargetRef],
+    new_targets: Vec<TargetRef>,
+}
+
 /// CR 115.7d: Apply a validated retarget to the stack entry, then hand priority
 /// back to the retargeting player. Single authority for both retarget entry
 /// points — the board-click (`ChooseTarget`) and dialog (`RetargetSpell`) paths
@@ -4759,16 +4852,54 @@ fn apply_action(
 fn apply_retarget(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
-    player: PlayerId,
-    stack_entry_index: usize,
-    legal_new_targets: &[TargetRef],
-    new_targets: Vec<TargetRef>,
+    submission: RetargetSubmission<'_>,
 ) -> Result<WaitingFor, EngineError> {
-    // CR 115.7d: Every submitted target must be in the legal set.
-    for t in &new_targets {
-        if !legal_new_targets.contains(t) {
+    let RetargetSubmission {
+        player,
+        stack_entry_index,
+        scope,
+        current_targets,
+        legal_new_targets,
+        new_targets,
+    } = submission;
+
+    match scope {
+        RetargetScope::Single => {
+            if new_targets.len() != 1 {
+                return Err(EngineError::InvalidAction(
+                    "Retarget: single-target change requires exactly one target".to_string(),
+                ));
+            }
+            if !legal_new_targets.contains(&new_targets[0]) {
+                return Err(EngineError::InvalidAction(
+                    "Retarget: chosen target not in legal alternatives".to_string(),
+                ));
+            }
+        }
+        RetargetScope::All => {
+            if new_targets.len() != current_targets.len() {
+                return Err(EngineError::InvalidAction(
+                    "Retarget: choose-new-targets submission must preserve target count"
+                        .to_string(),
+                ));
+            }
+            // CR 115.7d: For "choose new targets", unchanged targets may remain
+            // unchanged even if they are no longer legal. Changed targets still
+            // must be legal alternatives.
+            for (idx, target) in new_targets.iter().enumerate() {
+                if current_targets.get(idx) == Some(target) {
+                    continue;
+                }
+                if !legal_new_targets.contains(target) {
+                    return Err(EngineError::InvalidAction(
+                        "Retarget: chosen target not in legal alternatives".to_string(),
+                    ));
+                }
+            }
+        }
+        RetargetScope::ForcedTo(_) => {
             return Err(EngineError::InvalidAction(
-                "Retarget: chosen target not in legal alternatives".to_string(),
+                "Retarget: forced retarget is not interactive".to_string(),
             ));
         }
     }
@@ -6621,6 +6752,7 @@ mod tests {
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterType;
     use crate::types::format::FormatConfig;
+    use crate::types::game_state::CastingVariant;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
     use crate::types::TriggerMode;
@@ -6651,6 +6783,64 @@ mod tests {
         remember_public_reveals(&mut state, &events);
 
         assert!(state.public_revealed_cards.contains(&card_id));
+    }
+
+    #[test]
+    fn choose_new_targets_all_allows_unchanged_illegal_target() {
+        let mut state = GameState::new_two_player(42);
+        let stack_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Test Spell".to_string(),
+            Zone::Stack,
+        );
+        let unchanged = TargetRef::Object(ObjectId(901));
+        let legal_alternative = TargetRef::Object(ObjectId(902));
+        let stack_ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![unchanged.clone()],
+            stack_id,
+            PlayerId(1),
+        );
+        state.stack.push_back(StackEntry {
+            id: stack_id,
+            source_id: stack_id,
+            controller: PlayerId(1),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: Some(stack_ability),
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+        state.waiting_for = WaitingFor::RetargetChoice {
+            player: PlayerId(0),
+            stack_entry_index: 0,
+            scope: RetargetScope::All,
+            current_targets: vec![unchanged.clone()],
+            legal_new_targets: vec![legal_alternative],
+        };
+
+        apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::RetargetSpell {
+                new_targets: vec![unchanged.clone()],
+            },
+        )
+        .expect("unchanged targets do not need to be legal for choose-new-targets");
+
+        let targets = state
+            .stack
+            .front()
+            .and_then(|entry| entry.ability())
+            .map(|ability| ability.targets.clone())
+            .expect("spell remains on stack");
+        assert_eq!(targets, vec![unchanged]);
     }
 
     #[test]
@@ -6852,9 +7042,10 @@ mod tests {
                         produced: ManaProduction::Colorless {
                             count: QuantityExpr::Fixed { value: 2 },
                         },
-                        restrictions: vec![ManaSpendRestriction::SpellTypeOrAbilityActivation(
-                            "Colorless Eldrazi".to_string(),
-                        )],
+                        restrictions: vec![ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                            spell_type: "Colorless Eldrazi".to_string(),
+                            ability: crate::types::mana::AbilityActivationScope::OfSpellType,
+                        }],
                         grants: vec![],
                         expiry: None,
                         target: None,
@@ -6940,9 +7131,10 @@ mod tests {
                         produced: ManaProduction::Colorless {
                             count: QuantityExpr::Fixed { value: 2 },
                         },
-                        restrictions: vec![ManaSpendRestriction::SpellTypeOrAbilityActivation(
-                            "Colorless Eldrazi".to_string(),
-                        )],
+                        restrictions: vec![ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                            spell_type: "Colorless Eldrazi".to_string(),
+                            ability: crate::types::mana::AbilityActivationScope::OfSpellType,
+                        }],
                         grants: vec![],
                         expiry: None,
                         target: None,
@@ -11472,6 +11664,8 @@ mod tests {
             distribute: None,
             origin_zone: crate::types::zones::Zone::Hand,
             additional_cost_flow: None,
+            deferred_required_additional_cost: None,
+            additional_cost_queue: Vec::new(),
             additional_cost_source: crate::types::game_state::SpellCostSource::Other,
             deferred_modal_choice: None,
             deferred_target_selection: false,
@@ -11483,6 +11677,7 @@ mod tests {
             cancel_restore_prepared_source: None,
             payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
+            x_residual_activation: false,
         }));
         state.waiting_for = WaitingFor::ManaPayment {
             player: PlayerId(0),
@@ -11855,6 +12050,8 @@ mod tests {
             distribute: None,
             origin_zone: crate::types::zones::Zone::Hand,
             additional_cost_flow: None,
+            deferred_required_additional_cost: None,
+            additional_cost_queue: Vec::new(),
             additional_cost_source: crate::types::game_state::SpellCostSource::Other,
             deferred_modal_choice: None,
             deferred_target_selection: false,
@@ -11866,6 +12063,7 @@ mod tests {
             cancel_restore_prepared_source: None,
             payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             assist_state: AssistState::NotOffered,
+            x_residual_activation: false,
         }));
         state.waiting_for = WaitingFor::ManaPayment {
             player: PlayerId(0),
@@ -17646,6 +17844,7 @@ Echo—Discard a card. (At the beginning of your upkeep, if this came under your
             enters_attacking: false,
             owner_library: false,
             track_exiled_by_source: false,
+            face_down_profile: None,
             count_param: 0,
         };
         state.pending_continuation = Some(crate::types::game_state::PendingContinuation::new(
@@ -17714,6 +17913,7 @@ Echo—Discard a card. (At the beginning of your upkeep, if this came under your
             enters_attacking: false,
             owner_library: false,
             track_exiled_by_source: false,
+            face_down_profile: None,
             count_param: 0,
         };
 
@@ -17758,6 +17958,7 @@ Echo—Discard a card. (At the beginning of your upkeep, if this came under your
             enters_attacking: false,
             owner_library: false,
             track_exiled_by_source: false,
+            face_down_profile: None,
             count_param: 0,
         };
 
@@ -19778,11 +19979,12 @@ Echo—Discard a card. (At the beginning of your upkeep, if this came under your
     /// CR 702.24a: cumulative upkeep cost format is `[cost]` where `[cost]`
     /// may be any cost. Sacrifice-a-land is the canonical non-mana variant
     /// (Polar Kraken, Phyrexian Soulgorger).
+    use crate::types::ability::SacrificeCost;
+
     fn cumulative_upkeep_sacrifice_land_trigger() -> TriggerDefinition {
-        crate::database::synthesis::build_cumulative_upkeep_trigger(AbilityCost::Sacrifice {
-            target: TargetFilter::Typed(TypedFilter::land()),
-            count: 1,
-        })
+        crate::database::synthesis::build_cumulative_upkeep_trigger(AbilityCost::Sacrifice(
+            SacrificeCost::count(TargetFilter::Typed(TypedFilter::land()), 1),
+        ))
     }
 
     /// Construct a solo state with Polar Kraken on the battlefield (controller
@@ -19866,10 +20068,14 @@ Echo—Discard a card. (At the beginning of your upkeep, if this came under your
             WaitingFor::UnlessPayment { player, cost, .. } => {
                 assert_eq!(*player, PlayerId(0), "controller is the unless-payer");
                 match cost {
-                    AbilityCost::Sacrifice { target, count } => {
-                        assert_eq!(*count, 1, "1 age counter × base count 1 = 1");
+                    AbilityCost::Sacrifice(cost) => {
                         assert_eq!(
-                            *target,
+                            cost.requirement.fixed_count(),
+                            Some(1),
+                            "1 age counter × base count 1 = 1"
+                        );
+                        assert_eq!(
+                            cost.target,
                             TargetFilter::Typed(TypedFilter::land()),
                             "unless-cost target filter must remain Land"
                         );

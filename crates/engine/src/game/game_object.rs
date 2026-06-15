@@ -4,9 +4,11 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::types::ability::{
-    AbilityDefinition, AdditionalCost, BasicLandType, CastTimingPermission, CastVariantPaid,
-    CastingPermission, CastingRestriction, ChosenAttribute, ChosenSubtypeKind, ModalChoice,
-    ReplacementDefinition, SolveCondition, SpellCastingOption, StaticDefinition, TriggerDefinition,
+    additional_cost_instance_payment_count, additional_cost_instance_payment_count_for_ordinal,
+    AbilityDefinition, AdditionalCost, AdditionalCostInstancePayment, AdditionalCostOrigin,
+    BasicLandType, CastTimingPermission, CastVariantPaid, CastingPermission, CastingRestriction,
+    ChosenAttribute, ChosenSubtypeKind, ModalChoice, ReplacementDefinition, SolveCondition,
+    SpellCastingOption, StaticDefinition, TriggerDefinition,
 };
 use crate::types::card::{LayoutKind, PrintedCardRef, TokenImageRef};
 use crate::types::card_type::{CardType, CoreType};
@@ -74,6 +76,17 @@ pub struct BestowFormState;
 /// permanent — the merge identity lives in `GameObject::merged_components`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct MutateFormState;
+
+/// CR 712.4c / CR 730.2: Which merge keyword built a merged permanent.
+/// Disambiguates Meld (cannot transform — CR 712.4c) from Mutate, which
+/// `merged_components.len()` alone cannot, since a two-creature mutate also
+/// has `len() == 2`. The transform guard (CR 712.4c) keys on
+/// `Some(MergeKind::Meld)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MergeKind {
+    Mutate,
+    Meld,
+}
 
 /// CR 702.160a: Prototype form marker — `Some(_)` means this object was cast
 /// prototyped and should use the secondary power, toughness, and mana cost
@@ -571,6 +584,12 @@ pub struct GameObject {
     /// Kicker semantics.
     #[serde(default, skip_serializing_if = "is_zero_u32_field")]
     pub additional_cost_payment_count: u32,
+    /// CR 607.2g + CR 702.157b/702.175b: Per-instance non-kicker
+    /// additional-cost payments that produced this permanent, copied from
+    /// `SpellContext.additional_cost_payments` at cast resolution for linked
+    /// ETB triggers such as Squad and Offspring.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_cost_payments: Vec<AdditionalCostInstancePayment>,
     /// CR 702.51c: Creatures tapped to pay the convoke cost of the spell that
     /// produced this object. Stored as object ids so future convoke-reference
     /// classes can inspect identity; `QuantityRef::ConvokedCreatureCount`
@@ -607,6 +626,14 @@ pub struct GameObject {
     /// correct player's zone when the merged permanent leaves the battlefield.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub merged_components: Vec<ObjectId>,
+
+    /// CR 712.4c / CR 730.2: Which merge keyword produced this merged permanent
+    /// (`Mutate` vs `Meld`), or `None` for a non-merged object. The transform
+    /// guard (CR 712.4c) keys on `Some(MergeKind::Meld)` to forbid transforming a
+    /// melded permanent WITHOUT also blocking a two-creature mutate pile (which
+    /// also has `merged_components.len() == 2`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_kind: Option<MergeKind>,
 
     /// CR 730.2a + CR 702.140e: Stable id of the layer-1 copy effect that
     /// represents this merged permanent's topmost copiable values plus component
@@ -851,6 +878,24 @@ pub struct GameObject {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cast_from_zone: Option<Zone>,
 
+    /// CR 601.2a + CR 603.4: Transient field tracking the player who cast the
+    /// spell that became this permanent. Paired with `cast_from_zone` for
+    /// intervening-if clauses such as "if you cast it from your graveyard".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cast_controller: Option<PlayerId>,
+
+    /// CR 611.2f: Spell keywords effective AT CAST TIME (printed + statically /
+    /// transiently granted), snapshotted during `finalize_cast` BEFORE
+    /// `record_spell_cast_from_zone` increments the turn's spell history. Cast-time
+    /// "first qualifying spell each turn" grants (a `SpellsCastThisTurn == 0`-gated
+    /// `CastWithKeyword` static) must attach to THIS spell at the moment it is put
+    /// on the stack; re-querying the grant in `process_triggers` (post-record)
+    /// would see the spell already counted and wrongly drop the grant. Consumed by
+    /// the post-record SpellCast trigger seams (Cascade, Demonstrate). Transient:
+    /// cleared on zone change, mirroring `cast_from_zone`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cast_spell_keywords: Vec<Keyword>,
+
     /// CR 614.1a + CR 608.2n + CR 607.2b + CR 406.6: While present, this spell
     /// is exiled instead of being put into its owner's graveyard as it resolves,
     /// and the resulting exile is recorded as "exiled with" the stored source.
@@ -918,7 +963,37 @@ pub struct GameObject {
     pub phase_status: PhaseStatus,
 }
 
+/// CR 205.2 + CR 205.2a: Resolve a stored card-type choice from a chosen-attribute
+/// slice. The generic "choose a card type" persists as a `CardType` attribute; a
+/// restricted card-type choice ("Choose creature or land", Winding Way) parses as
+/// a `Labeled` modal option list and persists as a capitalized `Label`, which is
+/// parsed back to its `CoreType`. Shared by `GameObject::chosen_card_type` and
+/// the `FilterProp::IsChosenCardType` matcher so both forms bind uniformly.
+pub(crate) fn chosen_card_type_of(attrs: &[ChosenAttribute]) -> Option<CoreType> {
+    attrs.iter().find_map(|a| match a {
+        ChosenAttribute::CardType(t) => Some(*t),
+        ChosenAttribute::Label(label) => label.parse::<CoreType>().ok(),
+        _ => None,
+    })
+}
+
 impl GameObject {
+    pub fn instance_payment_count(&self, origin: AdditionalCostOrigin) -> u32 {
+        additional_cost_instance_payment_count(&self.additional_cost_payments, origin)
+    }
+
+    pub fn instance_payment_count_for_ordinal(
+        &self,
+        origin: AdditionalCostOrigin,
+        origin_ordinal: u32,
+    ) -> u32 {
+        additional_cost_instance_payment_count_for_ordinal(
+            &self.additional_cost_payments,
+            origin,
+            origin_ordinal,
+        )
+    }
+
     /// Oathbreaker RC: true for the command-zone signature spell role.
     pub fn is_signature_spell(&self) -> bool {
         self.signature_spell.is_some()
@@ -952,6 +1027,7 @@ impl GameObject {
             subtypes: self.card_types.subtypes.clone(),
             supertypes: self.card_types.supertypes.clone(),
             keywords: self.keywords.clone(),
+            trigger_definitions: self.trigger_definitions.iter_all().cloned().collect(),
             power: self.power,
             toughness: self.toughness,
             // CR 208.4b + CR 613.4b: Snapshot the layer-7b base values the same
@@ -1105,11 +1181,13 @@ impl GameObject {
             cost_x_paid: None,
             kickers_paid: Vec::new(),
             additional_cost_payment_count: 0,
+            additional_cost_payments: Vec::new(),
             convoked_creatures: Vec::new(),
             bestow_form: None,
             prototype_form: None,
             mutate_form: None,
             merged_components: Vec::new(),
+            merge_kind: None,
             pre_merge_is_token: None,
             merge_layer_effect_id: None,
             split_from_merge_survivor: None,
@@ -1153,6 +1231,8 @@ impl GameObject {
             room_unlocks: None,
             class_level: None,
             cast_from_zone: None,
+            cast_controller: None,
+            cast_spell_keywords: Vec::new(),
             exile_from_stack_linked_source: None,
             played_from_zone: None,
             mana_spent_to_cast: false,
@@ -1254,12 +1334,18 @@ impl GameObject {
         // it only for ability-effect-driven entries (Kodama anti-recursion guard).
         self.entered_via_ability_source = None;
         self.cast_timing_permission = None;
-        // CR 400.7 + CR 702.33d: kicker payments are bound to the casting
-        // event that produced this object. A re-entering permanent has no
-        // memory of prior kicker payments — clear before the cast resolution
-        // path repopulates from the resolving spell's `SpellContext`.
+        // CR 400.7d + CR 702.33d: cast provenance and kicker payments are
+        // bound to the casting event that produced this object. A re-entering
+        // permanent has no memory of prior cast links — clear before the cast
+        // resolution path repopulates from the resolving spell's context.
+        self.cast_from_zone = None;
+        self.cast_controller = None;
+        // CR 611.2f: the cast-time keyword snapshot is bound to the same casting
+        // event as `cast_from_zone`; clear it on zone change for the same reason.
+        self.cast_spell_keywords.clear();
         self.kickers_paid.clear();
         self.additional_cost_payment_count = 0;
+        self.additional_cost_payments.clear();
         // CR 400.7 + CR 702.51c: convoked-creature history is tied to the
         // spell-resolution event that created this object. A re-entering
         // permanent has no memory of a prior convoke payment.
@@ -1342,6 +1428,10 @@ impl GameObject {
         // re-checks resolve correctly. A permanent that leaves the battlefield
         // is a new object on any re-entry — clear the stale cast provenance.
         self.cast_from_zone = None;
+        self.cast_controller = None;
+        // CR 611.2f: the cast-time keyword snapshot is bound to the same casting
+        // event as `cast_from_zone`; clear it on the same zone-change boundary.
+        self.cast_spell_keywords.clear();
         // CR 400.7 + CR 603.6a: Ability-placement provenance is battlefield-entry
         // scoped — a permanent that leaves the battlefield is a new object on any
         // re-entry. Clear conservatively on exit, mirroring `cast_from_zone`.
@@ -1365,6 +1455,10 @@ impl GameObject {
         // re-entering object is not stuck carrying stale component ids. `mutate_form`
         // (stack-only, paralleling `bestow_form`) is intentionally NOT cleared here.
         self.merged_components.clear();
+        // CR 712.4c / CR 730.2 + CR 400.7: the merge-kind discriminator is
+        // battlefield-scoped like the rest of the merge identity; clear it so a
+        // re-entering object is not stuck as a phantom Meld/Mutate survivor.
+        self.merge_kind = None;
         // CR 730.2d + CR 400.7: the topmost-derived token-ness override is
         // battlefield-scoped. `split_merged_permanent_on_leave` restores it before
         // this reset runs; clear it defensively so a re-entering object never
@@ -1418,11 +1512,16 @@ impl GameObject {
 
     /// CR 205.2: Look up a stored card-type choice (e.g. the card
     /// type chosen as this permanent entered the battlefield).
+    ///
+    /// CR 205.2a: A *restricted* card-type choice ("Choose creature or land",
+    /// Winding Way) parses as a `Labeled` modal option list rather than the
+    /// generic "choose a card type", so it persists as a capitalized `Label`
+    /// rather than a `CardType`. The label still names a card type, so fall back
+    /// to parsing it (e.g. "Creature" → `CoreType::Creature`) — this lets every
+    /// "of the chosen type" reader (cost reduction, protection, the reveal-and-
+    /// partition move) bind a restricted card-type choice uniformly.
     pub fn chosen_card_type(&self) -> Option<CoreType> {
-        self.chosen_attributes.iter().find_map(|a| match a {
-            ChosenAttribute::CardType(t) => Some(*t),
-            _ => None,
-        })
+        chosen_card_type_of(&self.chosen_attributes)
     }
 
     /// Look up a stored basic land type choice.

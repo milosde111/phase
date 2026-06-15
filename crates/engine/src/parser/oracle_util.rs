@@ -1170,6 +1170,11 @@ const SUBTYPES: &[&str] = &[
     "Thopter",
     "Thrull",
     "Tiefling",
+    // CR 205.3m: "Time Lord" is the only two-word creature type. Multi-word
+    // matching is handled by `parse_subtype_entry`/`starts_with_word_ci`
+    // (full-entry match + word boundary); no SUBTYPE_PLURALS entry is needed
+    // because the regular plural "Time Lords" is covered by the +"s" branch.
+    "Time Lord",
     "Treefolk",
     "Trilobite",
     "Troll",
@@ -1596,14 +1601,68 @@ fn replace_all_words(haystack: &str, needle: &str, replacement: &str) -> String 
     result
 }
 
-// CR 201.4b: A card's Oracle text uses its name to refer to itself.
+/// Zone nouns that appear after a possessive in Oracle text ("your library", etc.).
+const POSSESSIVE_ZONE_NOUNS: &[&str] = &[
+    "library",
+    "hand",
+    "graveyard",
+    "battlefield",
+    "exile",
+    "stack",
+];
+
+/// Returns true when case-insensitively replacing `short_name` would rewrite a
+/// possessive zone phrase ("your library") rather than a card self-reference.
+fn of_short_name_collides_with_possessive_zone_phrase(text: &str, short_name: &str) -> bool {
+    let lower_short = short_name.to_ascii_lowercase();
+    if !POSSESSIVE_ZONE_NOUNS.contains(&lower_short.as_str()) {
+        return false;
+    }
+    let lower_text = text.to_ascii_lowercase();
+    POSSESSIVES.iter().any(|possessive| {
+        let phrase = format!("{possessive} {lower_short}");
+        nom_primitives::scan_contains(&lower_text, &phrase)
+    })
+}
+
+// CR 201.5: A card's Oracle text uses its name to refer to itself.
 /// Normalize all self-references in Oracle text to `~`.
 ///
 /// Handles full card name, Alchemy A- prefix, comma-based legendary short names
 /// ("Haliya, Guided by Light" → "Haliya"), "of"-based short names
 /// ("Rosie Cotton of South Lane" → "Rosie Cotton"), and first-word short names
 /// ("Sharuum the Hegemon" → "Sharuum"), plus generic phrases like "this creature".
+const RING_TEMPTS_YOU_PLACEHOLDER: &str = "\u{E0000}";
+
+// CR 701.54d: "Whenever the Ring tempts you" abilities trigger from the
+// temptation event, so this rules phrase must survive self-reference
+// normalization even on cards whose names contain "Ring".
+fn mask_ring_tempts_you_phrase(text: &str) -> String {
+    const PHRASE: &str = "the ring tempts you";
+    let lower = text.to_ascii_lowercase();
+    if !lower.contains(PHRASE) {
+        return text.to_string();
+    }
+
+    let mut masked = String::with_capacity(text.len());
+    let mut rest = text;
+    let mut lower_rest = lower.as_str();
+    while let Some(idx) = lower_rest.find(PHRASE) {
+        masked.push_str(&rest[..idx]);
+        masked.push_str(RING_TEMPTS_YOU_PLACEHOLDER);
+        rest = &rest[idx + PHRASE.len()..];
+        lower_rest = &lower_rest[idx + PHRASE.len()..];
+    }
+    masked.push_str(rest);
+    masked
+}
+
+fn unmask_ring_tempts_you_phrase(text: String) -> String {
+    text.replace(RING_TEMPTS_YOU_PLACEHOLDER, "the ring tempts you")
+}
+
 pub fn normalize_card_name_refs(text: &str, card_name: &str) -> String {
+    let text = mask_ring_tempts_you_phrase(text);
     // Strip A- prefix (Alchemy rebalanced cards in MTGJSON)
     let effective_name = card_name.strip_prefix("A-").unwrap_or(card_name);
 
@@ -1715,7 +1774,11 @@ pub fn normalize_card_name_refs(text: &str, card_name: &str) -> String {
                 ]
                 .iter()
                 .any(|anchor| nom_primitives::scan_contains(&result.to_ascii_lowercase(), anchor));
-            if short_name.len() >= 3 && !is_common_english_word && !subtype_in_type_change_context {
+            if short_name.len() >= 3
+                && !is_common_english_word
+                && !subtype_in_type_change_context
+                && !of_short_name_collides_with_possessive_zone_phrase(&result, short_name)
+            {
                 result = replace_all_words(&result, short_name, "~");
             }
         }
@@ -1804,7 +1867,7 @@ pub fn normalize_card_name_refs(text: &str, card_name: &str) -> String {
     let effective_name_str = effective_name;
     result = result.replace("named ~", &format!("named {effective_name_str}"));
 
-    result
+    unmask_ring_tempts_you_phrase(result)
 }
 
 /// Strip a comparator prefix from a comparison clause, returning (Comparator, remainder).
@@ -1916,6 +1979,14 @@ mod tests {
     }
 
     #[test]
+    fn normalize_ring_watcher_preserves_ring_tempts_you_trigger() {
+        assert_eq!(
+            normalize_card_name_refs("Whenever the Ring tempts you, draw a card.", "Ring Watcher"),
+            "Whenever the ring tempts you, draw a card."
+        );
+    }
+
+    #[test]
     fn normalize_verb_first_word_name_preserves_instruction_verb() {
         // CR 201.5: "Search for Tomorrow" begins its Oracle text with the
         // imperative verb "Search", not a self-reference. The strategy-5
@@ -2005,6 +2076,19 @@ mod tests {
         assert_eq!(
             normalize_card_name_refs("When Rosie Cotton enters", "Rosie Cotton of South Lane"),
             "When ~ enters"
+        );
+    }
+
+    #[test]
+    fn normalize_of_short_name_preserves_possessive_zone_library() {
+        // CR 201.5: "Library of Leng" derives short name "Library", which must
+        // not rewrite the zone phrase "your library" on this card's replacement line.
+        assert_eq!(
+            normalize_card_name_refs(
+                "If an effect causes you to discard a card, discard it, but you may put it on top of your library instead of into your graveyard.",
+                "Library of Leng"
+            ),
+            "If an effect causes you to discard a card, discard it, but you may put it on top of your library instead of into your graveyard."
         );
     }
 
@@ -2240,6 +2324,29 @@ mod tests {
         // Not a subtype.
         assert!(!is_subtype_word("sharuum"));
         assert!(!is_subtype_word("flying")); // that's a keyword, not a subtype
+    }
+
+    #[test]
+    fn parse_subtype_recognizes_two_word_time_lord() {
+        // CR 205.3m: "Time Lord" is the only two-word creature type. The
+        // two-word match is handled by `parse_subtype_entry`/`starts_with_word_ci`
+        // (full-entry match + word boundary), so the registry entry alone is
+        // sufficient — no SUBTYPE_PLURALS or canonicalization change is needed.
+        assert_eq!(
+            parse_subtype("Time Lord"),
+            Some(("Time Lord".to_string(), 9))
+        );
+        assert_eq!(
+            parse_subtype("time lord creature card"),
+            Some(("Time Lord".to_string(), 9))
+        );
+        // Regular plural via the +"s" branch — no SUBTYPE_PLURALS entry.
+        assert_eq!(
+            parse_subtype("Time Lords"),
+            Some(("Time Lord".to_string(), 10))
+        );
+        // Negative: a bare single word must NOT match the two-word subtype.
+        assert_eq!(parse_subtype("time you control"), None);
     }
 
     #[test]

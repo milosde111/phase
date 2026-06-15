@@ -92,6 +92,11 @@ pub(crate) fn eval_is_monarch(state: &GameState, controller: PlayerId) -> bool {
     state.monarch == Some(controller)
 }
 
+/// CR 726.3: True when the given player has the initiative.
+pub(crate) fn eval_is_initiative(state: &GameState, controller: PlayerId) -> bool {
+    state.initiative == Some(controller)
+}
+
 /// CR 702.131a + CR 702.131c: True when the given player has the city's blessing.
 pub(crate) fn eval_has_city_blessing(state: &GameState, controller: PlayerId) -> bool {
     state.city_blessing.contains(&controller)
@@ -105,6 +110,16 @@ pub(crate) fn eval_source_entered_this_turn(state: &GameState, source_id: Object
         .is_some_and(|obj| obj.entered_battlefield_turn == Some(state.turn_number))
 }
 
+/// CR 120.3 + CR 120.6 + CR 702.11b: True when the source permanent has actually
+/// dealt damage (combat or noncombat) since it entered the battlefield. Backs the
+/// `StaticCondition::SourceHasDealtDamage` predicate; the "hasn't dealt damage yet"
+/// negation wraps this via `StaticCondition::Not`. The flag is set in
+/// `deal_damage` on the first nonzero amount actually dealt and cleared on a
+/// battlefield exit (`apply_zone_exit_cleanup`).
+pub(crate) fn eval_source_has_dealt_damage(state: &GameState, source_id: ObjectId) -> bool {
+    state.objects_that_dealt_damage.contains(&source_id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -112,6 +127,16 @@ mod tests {
     use crate::types::game_state::GameState;
     use crate::types::player::PlayerId;
     use crate::types::CardId;
+
+    #[test]
+    fn eval_is_initiative_matches_designation_holder() {
+        let state = GameState {
+            initiative: Some(PlayerId(0)),
+            ..Default::default()
+        };
+        assert!(eval_is_initiative(&state, PlayerId(0)));
+        assert!(!eval_is_initiative(&state, PlayerId(1)));
+    }
 
     /// CR 110.5d: eval_source_is_tapped_on_battlefield must return false when the
     /// object is tapped but not on the battlefield (e.g. in the graveyard). The

@@ -12,10 +12,10 @@
 
 use engine::types::ability::{AbilityCost, CostObjectCount, QuantityExpr};
 use engine::types::keywords::{
-    BloodthirstValue, BuybackCost, CyclingCost, FlashbackCost, HexproofFilter, ProtectionTarget,
-    WardCost,
+    BestowCost, BloodthirstValue, BuybackCost, CyclingCost, EscapeCost, FlashbackCost,
+    HexproofFilter, ProtectionTarget, WardCost,
 };
-use engine::types::mana::ManaColor;
+use engine::types::mana::{ManaColor, ManaCost};
 use engine::types::Keyword;
 
 use crate::convert::result::{ConvResult, ConversionGap};
@@ -148,22 +148,18 @@ pub fn try_convert(rule: &Rule, path: &str) -> ConvResult<Option<Keyword>> {
 
         // === Phase 4b: ManaCost-payload keywords (Cost::PayMana only) ===
         // CR 702.103a: Bestow [cost] — alternative casting cost. The engine
-        // `Keyword::Bestow(ManaCost)` carries the alt cost; the cast-as-Aura
-        // type-changing on the stack (CR 702.103b) and the unattach exception
-        // (CR 702.103f vs CR 704.5n) are not yet wired to runtime. The keyword
-        // is preserved for display/coverage so the card surfaces in card-data
-        // export with its bestow cost; the alt-cost cast lane (which would
-        // require a `CastingVariant::Bestow` arm parallel to Evoke/Madness)
-        // remains a deferred Phase 2. The card is still playable for its
-        // printed mana cost as a vanilla creature spell.
-        Rule::Bestow(c) => Keyword::Bestow(pure_mana(c, "Rule::Bestow", path)?),
+        // `Keyword::Bestow(BestowCost::Mana(_))` carries the alt cost used by
+        // the bestow casting lane; cast-as-Aura type-changing happens at runtime
+        // (CR 702.103b), with the unattach exception covered by CR 702.103f /
+        // CR 704.5m.
+        Rule::Bestow(c) => Keyword::Bestow(BestowCost::Mana(pure_mana(c, "Rule::Bestow", path)?)),
         // CR 702.103a + CR 107.3a: BestowX is the X-cost variant — cost
         // contains an `{X}` shard. `pure_mana` accepts ManaCostX shards via
         // `cost_conv::as_pure_mana`, producing a `ManaCost` with `shards`
         // including `ManaCostShard::X`. The X-coupling between the cast and
         // any "enters with X +1/+1 counters" replacement is wired by the
         // replacement converter (see `convert/replacement.rs`).
-        Rule::BestowX(c) => Keyword::Bestow(pure_mana(c, "Rule::BestowX", path)?),
+        Rule::BestowX(c) => Keyword::Bestow(BestowCost::Mana(pure_mana(c, "Rule::BestowX", path)?)),
         Rule::Blitz(c) => Keyword::Blitz(pure_mana(c, "Rule::Blitz", path)?),
         Rule::Dash(c) => Keyword::Dash(pure_mana(c, "Rule::Dash", path)?),
         Rule::Disturb(c) => Keyword::Disturb(pure_mana(c, "Rule::Disturb", path)?),
@@ -191,6 +187,8 @@ pub fn try_convert(rule: &Rule, path: &str) -> ConvResult<Option<Keyword>> {
         Rule::Fortify(c) => Keyword::Fortify(pure_mana(c, "Rule::Fortify", path)?),
         Rule::Foretell(c) => Keyword::Foretell(pure_mana(c, "Rule::Foretell", path)?),
         Rule::Harmonize(c) => Keyword::Harmonize(pure_mana(c, "Rule::Harmonize", path)?),
+        Rule::Mayhem(c) => Keyword::Mayhem(pure_mana(c, "Rule::Mayhem", path)?),
+        Rule::BasicMayhem => Keyword::Mayhem(ManaCost::SelfManaCost),
         Rule::Kicker(c) => Keyword::Kicker(pure_mana(c, "Rule::Kicker", path)?),
         Rule::Madness(c) => Keyword::Madness(pure_mana(c, "Rule::Madness", path)?),
         Rule::Megamorph(c) => Keyword::Megamorph(pure_mana(c, "Rule::Megamorph", path)?),
@@ -406,8 +404,9 @@ pub fn try_convert(rule: &Rule, path: &str) -> ConvResult<Option<Keyword>> {
 
         // CR 702.138a: Escape — alternative casting cost from graveyard.
         // mtgish encodes the cost as `Cost::And([PayMana, ExileNumberGraveyardCards(N, ...)])`;
-        // the engine's `Keyword::Escape { cost, exile_count }` carries the
-        // mana payment and the literal exile count side-by-side.
+        // the engine's `Keyword::Escape(EscapeCost::NonMana(Composite[Mana, Exile{N, graveyard}]))`
+        // carries the mana payment and the graveyard-exile additional cost as a
+        // compound cost split at runtime.
         Rule::Escape(c) => extract_escape(c, path)?,
 
         // CR 702.106: Hidden Agenda — Conspiracy variant; deck-construction
@@ -859,7 +858,21 @@ fn extract_escape(cost: &Cost, path: &str) -> ConvResult<Keyword> {
         path: path.to_string(),
         detail: "missing ExileNumberGraveyardCards sub-cost".into(),
     })?;
-    Ok(Keyword::Escape { cost, exile_count })
+    // CR 702.138a: The engine models the escape cost as a compound
+    // `EscapeCost::NonMana(Composite[Mana, Exile{N, graveyard}])` so the mana
+    // sub-cost and the graveyard-exile additional cost split at runtime.
+    Ok(Keyword::Escape(EscapeCost::NonMana(
+        AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana { cost },
+                AbilityCost::Exile {
+                    count: exile_count,
+                    zone: Some(engine::types::zones::Zone::Graveyard),
+                    filter: None,
+                },
+            ],
+        },
+    )))
 }
 
 fn int_or_gap(g: &GameNumber, idiom: &'static str, path: &str) -> ConvResult<u32> {
@@ -922,7 +935,7 @@ mod tests {
     }
 
     /// CR 702.103a: `Rule::Bestow(Cost::PayMana(...))` lowers to
-    /// `Keyword::Bestow(ManaCost)` carrying the alt mana cost.
+    /// `Keyword::Bestow(BestowCost::Mana(_))` carrying the alt mana cost.
     #[test]
     fn bestow_with_pure_mana_cost_lowers_to_keyword() {
         use crate::schema::types::{Cost, ManaSymbol};
@@ -934,7 +947,7 @@ mod tests {
             .expect("conversion should succeed")
             .expect("rule should be recognized as a keyword");
         match keyword {
-            Keyword::Bestow(mc) => {
+            Keyword::Bestow(BestowCost::Mana(mc)) => {
                 use engine::types::mana::ManaCostShard;
                 use engine::types::ManaCost;
                 assert_eq!(
@@ -968,7 +981,7 @@ mod tests {
             .expect("conversion should succeed")
             .expect("rule should be recognized as a keyword");
         match keyword {
-            Keyword::Bestow(mc) => {
+            Keyword::Bestow(BestowCost::Mana(mc)) => {
                 use engine::types::mana::ManaCostShard;
                 use engine::types::ManaCost;
                 assert_eq!(

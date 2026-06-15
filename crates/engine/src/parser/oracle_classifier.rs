@@ -232,6 +232,10 @@ const STATIC_CONTAINS_PATTERNS: &[&str] = &[
     // to StaticMode::AttachmentRestriction instead of an effect.
     "can be attached only to",
     "can't attack",
+    // CR 506.5 + CR 508.1c: Master of Cruelties — "~ can only attack alone"
+    // must route to the static parser (CombatAlone MustBeSole), not the effect
+    // pipeline where it previously lowered to Unimplemented.
+    "can only attack alone",
     "can't block",
     "can't be countered",
     "can't be copied",
@@ -246,6 +250,11 @@ const STATIC_CONTAINS_PATTERNS: &[&str] = &[
     "no maximum hand size",
     "may choose not to untap",
     "play with the top card",
+    // CR 400.2 + CR 701.20a: Telepathy/Revelation class. Keep this narrower
+    // than generic hand-reveal effects ("reveal a card from your hand") by
+    // matching the continuous "hand(s) revealed" wording.
+    "hands revealed",
+    "hand revealed",
     "cost {",
     "costs {",
     "cost less",
@@ -318,6 +327,11 @@ const STATIC_CONTAINS_PATTERNS: &[&str] = &[
     "as though they had flash",
     "as though those creatures had haste",
     "as though that creature had haste",
+    // CR 509.1b + CR 702.28b: shadow block permission (Heartwood Dryad, Wall of
+    // Diffusion) — "can block creatures with shadow as though [they didn't|it] had
+    // shadow". Anchored on the full subject so it never false-matches a plain
+    // shadow grant or attacker-side restriction.
+    "block creatures with shadow as though",
     // CR 205.3 + CR 700.8: "<source> is also a[n] <subtype>(, <subtype>)*" —
     // self continuous type-grant (Burakos, Veteran Adventurer, and any future
     // printing whose first subtype opens with a vowel: "is also an Elf, …").
@@ -553,6 +567,13 @@ const REPLACEMENT_CONTAINS_PATTERNS: &[&str] = &[
     // `parse_replacement_line` even when its suffix carries a static keyword
     // pattern like "has haste" that would otherwise classify it as static.
     "become a copy of",
+    // CR 110.2a + CR 614.1d: "[self] enters under the control of an opponent of
+    // your choice" (Xantcha, Sleeper Agent; Pendant of Prosperity; Abby,
+    // Merciless Soldier). A self-ETB controller-override replacement — route the
+    // line to `parse_replacement_line`/`parse_self_enters_under_opponent`, whose
+    // self-subject gate rejects external-subject false positives. Without this,
+    // the line falls through to the effect parser and emits Unimplemented.
+    "enters under the control of",
 ];
 
 pub(crate) fn is_replacement_pattern(lower: &str) -> bool {
@@ -598,6 +619,11 @@ fn is_replacement_compound_pattern(lower: &str) -> bool {
     }
     if scan_contains(lower, "causes you to discard this card")
         && scan_contains(lower, "instead of putting it into your graveyard")
+    {
+        return true;
+    }
+    if scan_contains(lower, "an effect causes you to discard a card")
+        && scan_contains(lower, "instead of into your graveyard")
     {
         return true;
     }

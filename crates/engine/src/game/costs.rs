@@ -389,8 +389,8 @@ fn pay_ability_cost_inner(
             }
         }
         // CR 118.3: Sacrifice as a cost — sacrifice the source (SelfRef) or a chosen permanent.
-        AbilityCost::Sacrifice { target, .. } => {
-            if matches!(target, TargetFilter::SelfRef) {
+        AbilityCost::Sacrifice(cost) => {
+            if matches!(cost.target, TargetFilter::SelfRef) {
                 if super::static_abilities::player_cant_sacrifice_as_cost(state, player, source_id)
                 {
                     return Ok(payment_failed("Cannot sacrifice this permanent as a cost"));
@@ -756,10 +756,34 @@ fn pay_ability_cost_inner(
                 None,
             );
         }
+        // CR 118.3 + CR 602.2b + CR 601.2h: Self-return costs such as
+        // Recurring Nightmare and Maze's End are automatic once chosen;
+        // non-self returns use the WaitingFor::PayCost detour before payment
+        // begins.
+        AbilityCost::ReturnToHand {
+            count,
+            filter: Some(TargetFilter::SelfRef),
+            from_zone,
+        } => {
+            if *count != 1 {
+                return Ok(payment_failed(
+                    "self return-to-hand cost must return exactly one permanent",
+                ));
+            }
+            let Some(obj) = state.objects.get(&source_id) else {
+                return Ok(payment_failed("source not found for return-to-hand cost"));
+            };
+            let expected_zone = from_zone.unwrap_or(Zone::Battlefield);
+            if obj.zone != expected_zone {
+                return Ok(payment_failed(
+                    "cannot return source to hand: source is not in the required zone",
+                ));
+            }
+            super::zones::move_to_zone(state, source_id, Zone::Hand, events);
+        }
         // Other cost types require interactive resolution and are intercepted
         // before reaching pay_ability_cost, or are not yet auto-payable.
         AbilityCost::Untap
-        | AbilityCost::Discard { .. }
         | AbilityCost::Exile { .. }
         | AbilityCost::CollectEvidence { .. }
         | AbilityCost::TapCreatures { .. }
@@ -767,8 +791,8 @@ fn pay_ability_cost_inner(
         | AbilityCost::Mill { .. }
         | AbilityCost::Blight { .. }
         | AbilityCost::Reveal { .. }
-        | AbilityCost::Behold { .. }
-        | AbilityCost::NinjutsuFamily { .. } => {
+        | AbilityCost::Behold { .. } => {}
+        AbilityCost::Discard { .. } | AbilityCost::NinjutsuFamily { .. } => {
             // At Activation these shapes are intercepted by the interactive
             // WaitingFor detours before payment is invoked, so passing through
             // to `Paid` is sound. At Resolution there is no interceptor — but
@@ -845,6 +869,7 @@ pub(crate) fn can_pay(
             if matches!(cost, AbilityCost::Waterbend { .. }) {
                 return true;
             }
+            crate::game::perf_counters::record_state_clone_for_legality();
             let mut simulated = state.clone();
             // CR 601.2h: dry-run the authority on a throwaway clone. A `Failed`
             // outcome (insufficient mana, life, …) or an engine error (e.g. a
@@ -903,7 +928,7 @@ fn supported_at_resolution(cost: &AbilityCost) -> bool {
         | AbilityCost::Tap
         | AbilityCost::Untap
         | AbilityCost::Loyalty { .. }
-        | AbilityCost::Sacrifice { .. }
+        | AbilityCost::Sacrifice(_)
         | AbilityCost::Exile { .. }
         | AbilityCost::ExileMaterials { .. }
         | AbilityCost::CollectEvidence { .. }
@@ -1021,7 +1046,7 @@ fn can_pay_resolution(
         | AbilityCost::Untap
         | AbilityCost::Unattach
         | AbilityCost::Loyalty { .. }
-        | AbilityCost::Sacrifice { .. }
+        | AbilityCost::Sacrifice(_)
         | AbilityCost::Exile { .. }
         | AbilityCost::ExileMaterials { .. }
         | AbilityCost::CollectEvidence { .. }
@@ -1047,7 +1072,7 @@ mod tests {
     use crate::game::scenario::GameScenario;
     use crate::types::ability::{
         BeholdCostAction, CardSelectionMode, CostObjectCount, DiscardSelfScope, Effect,
-        NinjutsuVariant, QuantityExpr,
+        NinjutsuVariant, QuantityExpr, SacrificeCost,
     };
     use crate::types::counter::{CounterMatch, CounterType};
     use crate::types::mana::ManaCost;
@@ -1072,10 +1097,9 @@ mod tests {
             AbilityCost::Tap => AbilityCost::Tap,
             AbilityCost::Untap => AbilityCost::Untap,
             AbilityCost::Loyalty { .. } => AbilityCost::Loyalty { amount: 1 },
-            AbilityCost::Sacrifice { .. } => AbilityCost::Sacrifice {
-                target: TargetFilter::SelfRef,
-                count: 1,
-            },
+            AbilityCost::Sacrifice(_) => {
+                AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1))
+            }
             AbilityCost::PayLife { .. } => AbilityCost::PayLife {
                 amount: life.clone(),
             },
@@ -1176,10 +1200,7 @@ mod tests {
             AbilityCost::Tap,
             AbilityCost::Untap,
             AbilityCost::Loyalty { amount: 0 },
-            AbilityCost::Sacrifice {
-                target: TargetFilter::SelfRef,
-                count: 1,
-            },
+            AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
             AbilityCost::PayLife {
                 amount: QuantityExpr::Fixed { value: 0 },
             },
@@ -1302,10 +1323,7 @@ mod tests {
             AbilityCost::PayEnergy {
                 amount: QuantityExpr::Fixed { value: 1 },
             },
-            AbilityCost::Sacrifice {
-                target: TargetFilter::SelfRef,
-                count: 1,
-            },
+            AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
             AbilityCost::Loyalty { amount: 1 },
             AbilityCost::RemoveCounter {
                 count: 1,
@@ -1337,6 +1355,44 @@ mod tests {
         }
     }
 
+    #[test]
+    fn self_return_to_hand_cost_honors_explicit_from_zone() {
+        let mut scenario = GameScenario::new();
+        let src = scenario
+            .add_creature(P0, "Self Returning Source", 2, 2)
+            .id();
+        let graveyard_cost = AbilityCost::ReturnToHand {
+            count: 1,
+            filter: Some(TargetFilter::SelfRef),
+            from_zone: Some(Zone::Graveyard),
+        };
+
+        let rejected = pay_ability_cost_for_activation(
+            &mut scenario.state,
+            P0,
+            src,
+            &graveyard_cost,
+            &mut Vec::new(),
+        );
+        assert!(matches!(rejected, Err(EngineError::ActionNotAllowed(_))));
+        assert_eq!(scenario.state.objects[&src].zone, Zone::Battlefield);
+
+        let battlefield_cost = AbilityCost::ReturnToHand {
+            count: 1,
+            filter: Some(TargetFilter::SelfRef),
+            from_zone: Some(Zone::Battlefield),
+        };
+        pay_ability_cost_for_activation(
+            &mut scenario.state,
+            P0,
+            src,
+            &battlefield_cost,
+            &mut Vec::new(),
+        )
+        .expect("battlefield self-return cost should be payable");
+        assert_eq!(scenario.state.objects[&src].zone, Zone::Hand);
+    }
+
     /// Activation-scope `can_pay` against `state` for `source`.
     fn can_pay_activation(state: &GameState, source: ObjectId, cost: &AbilityCost) -> bool {
         let excluded = ability_mana_payment_excluded_sources(cost, source);
@@ -1362,13 +1418,13 @@ mod tests {
         let mut scenario = GameScenario::new();
         let src = scenario.add_creature(P0, "Altar", 0, 1).id();
         // The source is a 0/1 creature; "another creature" filter excludes it.
-        let cost = AbilityCost::Sacrifice {
-            target: TargetFilter::Typed(
+        let cost = AbilityCost::Sacrifice(SacrificeCost::count(
+            TargetFilter::Typed(
                 TypedFilter::creature()
                     .properties(vec![crate::types::ability::FilterProp::Another]),
             ),
-            count: 1,
-        };
+            1,
+        ));
         assert!(
             !can_pay_activation(&scenario.state, src, &cost),
             "no other creature to sacrifice → unpayable"

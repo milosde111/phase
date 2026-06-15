@@ -151,6 +151,58 @@ pub(crate) fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option
     // clause binds an earlier variable-X mana-value qualifier on the subject.
     let (keyword, where_x) = parse_keyword_with_where_x(keyword_str)?;
 
+    // CR 611.2f: "The first <qualifier> spell you cast [from <zone>] <timing> has
+    // [keyword]" — a once-per-turn keyword grant gated on the first qualifying
+    // spell of the turn (Peri Brown, The Twelfth Doctor, Maelstrom Nexus,
+    // Wild-Magic Sorcerer, Current Curriculum). Reuses the same
+    // `parse_first_qualified_spell_filter` grammar + `first_qualified_spell_condition`
+    // gate as the paired cost-modifier consumer, so the qualifying spell filter,
+    // cast-origin restriction, and `SpellsCastThisTurn == 0` gate are all preserved
+    // instead of collapsing to "every spell you cast".
+    match parse_first_qualified_spell_filter(subject) {
+        // Not a first-qualified-spell line — fall through to the ordinary
+        // "[type] spells you cast [from zone] have [keyword]" patterns below.
+        FirstQualifiedSpell::NotApplicable => {}
+        // The shape is present but the qualifier/timing isn't representable. Fall
+        // through (NOT a `return None`) so the existing gateless static is
+        // preserved for not-yet-representable qualifiers — no regression.
+        FirstQualifiedSpell::UnsupportedQualifier => {}
+        FirstQualifiedSpell::Supported(filter, timing) => {
+            // CR 601.2f: trailing-residue guard. `parse_first_qualified_spell_filter`
+            // discards any text after the timing phrase; if that region is
+            // non-empty an unrepresentable qualifier was dropped (Rain of Riches'
+            // "that mana from a Treasure was spent to cast"; TARDIS Bay's
+            // post-timing "with mana value 2 or greater"). Decline rather than emit
+            // a residue-blind gate — fall through to the existing gateless static.
+            if first_qualified_spell_subject_fully_consumed(subject) {
+                // CR 601.2a: scope `ControllerRef::You` to every leaf (And/Not
+                // recursion) so an opponent's qualifying spell never qualifies.
+                let affected =
+                    apply_spell_keyword_subject_constraints(filter.clone(), None, None, Vec::new());
+                // CR 611.2f: `SpellsCastThisTurn(filter) == 0` first-spell gate,
+                // plus `DuringYourTurn` for the controller-turn timing (a clean
+                // "during each of your turns" subject with no post-timing residue;
+                // TARDIS Bay itself declines above because its MV qualifier follows
+                // the timing). When a leading "during your turn," scope was already
+                // stripped, combine both rather than dropping either.
+                let first_qualified = first_qualified_spell_condition(&filter, &timing);
+                let combined_condition = match condition.clone() {
+                    Some(leading) => StaticCondition::And {
+                        conditions: vec![leading, first_qualified],
+                    },
+                    None => first_qualified,
+                };
+                return Some(
+                    StaticDefinition::new(StaticMode::CastWithKeyword { keyword })
+                        .affected(affected)
+                        .condition(combined_condition)
+                        .description(text.to_string())
+                        .active_zones(vec![Zone::Battlefield]),
+                );
+            }
+        }
+    }
+
     // Find "spells you cast" in the subject — may be preceded by a type descriptor
     let spell_marker = subject
         .match_indices("spells you cast")
@@ -312,7 +364,25 @@ pub(crate) fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option
         }
         return Some(def);
     }
-
+    // Pattern 3: "[type] cards in/from [your zone] have [keyword]"
+    // CR 702.81a (Retrace): Grants a casting keyword to cards in a specific zone.
+    // Six grants retrace to nonland permanent cards in your graveyard.
+    // Emits a Continuous static with AddKeyword so the off-zone keyword-grant
+    // path (`effective_off_zone_keywords`) sees the grant and the card becomes
+    // castable from the graveyard.
+    {
+        let (base_filter, rest) = parse_type_phrase(subject);
+        if rest.trim().is_empty() && target_filter_is_your_graveyard(&base_filter) {
+            let mut def = StaticDefinition::continuous()
+                .affected(base_filter)
+                .modifications(vec![ContinuousModification::AddKeyword { keyword }])
+                .description(text.to_string());
+            if let Some(condition) = condition.clone() {
+                def = def.condition(condition);
+            }
+            return Some(def);
+        }
+    }
     None
 }
 
@@ -422,6 +492,32 @@ pub(crate) fn apply_spell_keyword_subject_constraints(
                 })
                 .collect(),
         },
+        // CR 601.2a: compound subjects ("<type> spell you cast from <zone>") lower
+        // to And/Not; recurse so `ControllerRef::You` reaches every leaf, otherwise
+        // the grant would scope to opponents' qualifying spells too. The And arm is
+        // live on the first-qualified-spell keyword-grant path (type + origin-zone
+        // both present); the Not arm is defensive.
+        TargetFilter::And { filters } => TargetFilter::And {
+            filters: filters
+                .into_iter()
+                .map(|filter| {
+                    apply_spell_keyword_subject_constraints(
+                        filter,
+                        zone_filter.clone(),
+                        mv_filter.clone(),
+                        extra_props.clone(),
+                    )
+                })
+                .collect(),
+        },
+        TargetFilter::Not { filter } => TargetFilter::Not {
+            filter: Box::new(apply_spell_keyword_subject_constraints(
+                *filter,
+                zone_filter.clone(),
+                mv_filter.clone(),
+                extra_props.clone(),
+            )),
+        },
         other => other,
     }
 }
@@ -509,6 +605,30 @@ pub(crate) fn parse_chosen_qualifier_subject(tp: &TextPair<'_>) -> Option<Target
     Some(TargetFilter::Typed(typed))
 }
 
+/// CR 613.1f + CR 113.3: Recognize the exact `ExiledBySource` forms of "all
+/// activated abilities of [source]" and return the provider `source` filter.
+/// Returns `None` for forms not yet supported (typed "creature cards exiled with
+/// it", counter-gated exile, battlefield filters) so they stay a loud gap rather
+/// than over-granting. `lower` is the already-lowercased predicate.
+fn parse_grant_all_activated_abilities_source(
+    lower: &str,
+) -> Option<crate::types::ability::TargetFilter> {
+    let p = lower.trim().trim_end_matches('.').trim();
+    all_consuming(preceded(
+        tag::<_, _, OracleError<'_>>("all activated abilities of "),
+        alt((
+            value(TargetFilter::ExiledBySource, tag("the exiled card")),
+            value(
+                TargetFilter::ExiledBySource,
+                (tag("all cards exiled with "), alt((tag("it"), tag("~")))),
+            ),
+        )),
+    ))
+    .parse(p)
+    .ok()
+    .map(|(_, source)| source)
+}
+
 pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModification> {
     // Strip "where X is [quantity]" before parsing modifications,
     // but only if the text doesn't contain quoted abilities (which have their
@@ -525,6 +645,16 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
     let unquoted_text = strip_quoted_segments(text_stripped);
     let unquoted_lower = unquoted_text.to_lowercase();
     let unquoted_tp = TextPair::new(&unquoted_text, &unquoted_lower);
+
+    // CR 613.1f + CR 113.3: "all activated abilities of [the exiled card | all
+    // cards exiled with it]" — grant the host all activated abilities of the
+    // cards exiled with it (Myr Welder, Territory Forge). First pass recognizes
+    // only the exact `ExiledBySource` forms; typed ("creature cards exiled with
+    // it"), counter-gated, and battlefield sources stay a gap (follow-ups).
+    if let Some(source) = parse_grant_all_activated_abilities_source(unquoted_tp.lower) {
+        return vec![ContinuousModification::GrantAllActivatedAbilitiesOf { source }];
+    }
+
     let mut modifications = Vec::new();
 
     // CR 205.1a + CR 613.1d/f: "loses all [other] abilities, card types, and
@@ -576,6 +706,17 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
         "assigns combat damage equal to its toughness rather than its power",
     ) {
         modifications.push(ContinuousModification::AssignDamageFromToughness);
+    }
+
+    // CR 701.15b: Positive goaded designation on token anaphors and compound
+    // statics ("The tokens are goaded for the rest of the game", Life of the
+    // Party; "Enchanted creature … is goaded").
+    if nom_primitives::scan_contains(unquoted_lower.as_str(), "is goaded")
+        || nom_primitives::scan_contains(unquoted_lower.as_str(), "are goaded")
+    {
+        modifications.push(ContinuousModification::AddStaticMode {
+            mode: StaticMode::Goaded,
+        });
     }
 
     // CR 702.73a + CR 205.3 + CR 613.1d: Conjunctive "is/are every creature
@@ -773,6 +914,29 @@ pub(crate) fn push_grant_clause_modifications(
         }
     }
 
+    // CR 608.2d + CR 613.1f: chosen-keyword anaphor — "that ability" / "the
+    // chosen ability" / "the chosen keyword" refers back to a preceding
+    // `Effect::Choose { ChoiceType::Keyword, persist }` clause (Angelic
+    // Skirmisher: "choose first strike, vigilance, or lifelink. Creatures you
+    // control gain that ability ..."; Linvala, Shield of Sea Gate: "choose
+    // hexproof or indestructible. Creatures you control gain that ability
+    // ..."). Emits `AddChosenKeyword`, which reads the granting source's
+    // `ChosenAttribute::Keyword` at layer evaluation — the additive mirror of
+    // `RemoveChosenKeyword` (Urborg / Walking Sponge). Checked before
+    // `map_keyword` so the anaphor is never mis-classified as an unknown
+    // keyword. Builds for the whole "gain the chosen keyword" class.
+    if alt((
+        tag::<_, _, OracleError<'_>>("that ability"),
+        tag("the chosen ability"),
+        tag("the chosen keyword"),
+    ))
+    .parse(part_lower.as_str())
+    .is_ok()
+    {
+        modifications.push(ContinuousModification::AddChosenKeyword);
+        return;
+    }
+
     if let Some(kw) = map_keyword(part_trimmed) {
         modifications.push(ContinuousModification::AddKeyword { keyword: kw });
         return;
@@ -888,7 +1052,11 @@ pub(crate) fn classify_quoted_inner(ability_text: &str) -> Vec<ContinuousModific
 
 /// CR 702: Split a keyword list like "flying and first strike" into individual keywords.
 pub(crate) fn split_keyword_list(text: &str) -> Vec<Cow<'_, str>> {
-    let text = text.trim().trim_end_matches('.');
+    // Strip both trailing periods and trailing commas. A comma tail arises when
+    // `strip_quoted_segments` removes `and "Whenever..."` from the end of a list
+    // like "has first strike, trample, haste, and \"Whenever...\""— the connector
+    // `, and` is dropped but the comma after the last bare keyword remains.
+    let text = text.trim().trim_end_matches(['.', ',']).trim();
     // Split on ", and/or ", ", and ", " and ", or ", " — longest-match-first
     // ordering prevents ", and " from consuming the prefix of ", and/or ".
     let mut parts: Vec<&str> = Vec::new();

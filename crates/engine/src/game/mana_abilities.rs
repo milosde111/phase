@@ -43,6 +43,9 @@ pub fn is_mana_ability(ability_def: &AbilityDefinition) -> bool {
     // `Effect::Mana::target` field (Jeska's Will mode 1: "Add {R} for each
     // card in target opponent's hand" — the spell targets, so it must use the
     // stack and is not a mana ability under CR 605).
+    if ability_def.multi_target.is_some() || target_attached.is_some() {
+        return false;
+    }
     ability_def.multi_target.is_none() && target_attached.is_none()
 }
 
@@ -1016,6 +1019,17 @@ pub fn can_activate_mana_ability_now(
     {
         return false;
     }
+    can_activate_mana_ability_by_simulation(state, player, source_id, ability_index, ability_def)
+}
+
+fn can_activate_mana_ability_by_simulation(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    ability_index: usize,
+    ability_def: &AbilityDefinition,
+) -> bool {
+    crate::game::perf_counters::record_state_clone_for_legality();
     let mut simulated = state.clone();
     activate_mana_ability(
         &mut simulated,
@@ -1653,10 +1667,10 @@ where
         // CR 118.3 + CR 605.3b: Self-sacrifice mana ability costs are paid
         // atomically before mana production. This is the Treasure / Eldrazi
         // Spawn / Lotus Petal shape.
-        Some(AbilityCost::Sacrifice {
-            target: TargetFilter::SelfRef,
-            ..
-        }) => {
+        Some(AbilityCost::Sacrifice(cost))
+            if matches!(cost.target, TargetFilter::SelfRef)
+                && cost.requirement == crate::types::ability::SacrificeRequirement::count(1) =>
+        {
             if super::static_abilities::player_cant_sacrifice_as_cost(state, player, source_id) {
                 return Err(EngineError::ActionNotAllowed(
                     "Cannot sacrifice this permanent as a cost".to_string(),
@@ -1668,10 +1682,19 @@ where
         // as a mana ability cost (Phyrexian Altar class). The interactive flow
         // has already captured the chosen permanents; verify each is still
         // legal and route through the sacrifice replacement pipeline.
-        Some(AbilityCost::Sacrifice { target, count })
-            if !matches!(target, TargetFilter::SelfRef) =>
+        Some(AbilityCost::Sacrifice(cost))
+            if !matches!(cost.target, TargetFilter::SelfRef)
+                && matches!(
+                    cost.requirement,
+                    crate::types::ability::SacrificeRequirement::Count { .. }
+                ) =>
         {
-            for _ in 0..*count {
+            let crate::types::ability::SacrificeRequirement::Count { count } = cost.requirement
+            else {
+                unreachable!("guarded above");
+            };
+            let target = &cost.target;
+            for _ in 0..count {
                 let chosen_id = chosen_sacrificed_battlefield.next().ok_or_else(|| {
                     EngineError::InvalidAction(
                         "Missing sacrificed permanent selection for mana ability".to_string(),
@@ -1786,10 +1809,11 @@ where
                             }
                         }
                     }
-                    AbilityCost::Sacrifice {
-                        target: TargetFilter::SelfRef,
-                        ..
-                    } => {
+                    AbilityCost::Sacrifice(cost)
+                        if matches!(cost.target, TargetFilter::SelfRef)
+                            && cost.requirement
+                                == crate::types::ability::SacrificeRequirement::count(1) =>
+                    {
                         if super::static_abilities::player_cant_sacrifice_as_cost(
                             state, player, source_id,
                         ) {
@@ -1799,8 +1823,17 @@ where
                         }
                         let _ = sacrifice::sacrifice_permanent(state, source_id, player, events)?;
                     }
-                    AbilityCost::Sacrifice { target, count } => {
-                        for _ in 0..*count {
+                    AbilityCost::Sacrifice(cost) => {
+                        let crate::types::ability::SacrificeRequirement::Count { count } =
+                            cost.requirement
+                        else {
+                            return Err(EngineError::InvalidAction(
+                                "Unsupported sacrifice cost requirement for mana ability"
+                                    .to_string(),
+                            ));
+                        };
+                        let target = &cost.target;
+                        for _ in 0..count {
                             let chosen_id =
                                 chosen_sacrificed_battlefield.next().ok_or_else(|| {
                                     EngineError::InvalidAction(
@@ -1980,10 +2013,12 @@ fn cost_resolves_without_choice(cost: &Option<AbilityCost>) -> bool {
 fn cost_component_choice_free(cost: &AbilityCost) -> bool {
     match cost {
         AbilityCost::Tap => true,
-        AbilityCost::Sacrifice {
-            target: TargetFilter::SelfRef,
-            count,
-        } => *count == 1,
+        AbilityCost::Sacrifice(cost)
+            if matches!(cost.target, TargetFilter::SelfRef)
+                && cost.requirement == crate::types::ability::SacrificeRequirement::count(1) =>
+        {
+            true
+        }
         AbilityCost::Composite { costs } => costs.iter().all(cost_component_choice_free),
         _ => false,
     }
@@ -2230,7 +2265,9 @@ fn pay_mana_sub_cost(
             EngineError::ActionNotAllowed("Mana pool cannot cover mana ability cost".to_string())
         })?,
     };
-    let _ = spent;
+    if !spent.is_empty() || hybrid_plan.is_some() {
+        state.layers_dirty.mark_full();
+    }
     // CR 605.3b: The player's mana pool mutation is the public signal; no
     // dedicated event exists for ability mana payments. The pool-diff is
     // surfaced via the standard state-update machinery.
@@ -2488,7 +2525,7 @@ fn prepare_deterministic_exile_cost_selection(
 }
 
 /// CR 117.1 + CR 118.3 + CR 605.3b: Surface eligible battlefield permanents
-/// for an `AbilityCost::Sacrifice { target: !SelfRef }` mana ability cost.
+/// for an `AbilityCost::Sacrifice(SacrificeCost::count(!SelfRef, 1))` mana ability cost.
 /// Delegates eligibility to the casting cost helper so mana and non-mana
 /// activation costs share the same battlefield/controller/filter semantics.
 fn sacrifice_cost_choice(
@@ -2675,10 +2712,11 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityCondition, AbilityCost, AbilityKind, AbilityTag, ActivationRestriction, Comparator,
-        ContinuousModification, ControllerRef, DevotionColors, Duration, Effect, FilterProp,
-        LinkedExileScope, ManaContribution, ManaProduction, MultiTargetSpec, ObjectScope,
-        PlayerScope, QuantityExpr, QuantityRef, StaticDefinition, TargetFilter, TypeFilter,
-        TypedFilter, REMOVE_COUNTER_COST_ANY_NUMBER,
+        ContinuousModification, ControllerRef, CopyRetargetPermission, DelayedTriggerCondition,
+        DevotionColors, Duration, Effect, FilterProp, LinkedExileScope, ManaContribution,
+        ManaProduction, MultiTargetSpec, ObjectScope, PlayerScope, QuantityExpr, QuantityRef,
+        SacrificeCost, StaticDefinition, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
+        REMOVE_COUNTER_COST_ANY_NUMBER,
     };
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterType;
@@ -2772,6 +2810,31 @@ mod tests {
     }
 
     #[test]
+    fn is_mana_ability_serialized_only_when_true() {
+        // The AbilityDefinition Serialize impl emits the derived `is_mana_ability`
+        // UI key (skip_serializing_if = is_false), so the client routes mana-tap
+        // affordances off this engine flag instead of introspecting the effect AST.
+        let mana = make_mana_ability(ManaProduction::Fixed {
+            colors: vec![ManaColor::Green],
+            contribution: ManaContribution::Base,
+        });
+        let mana_json = serde_json::to_value(&mana).unwrap();
+        assert_eq!(mana_json["is_mana_ability"], serde_json::json!(true));
+
+        let non_mana = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Any,
+                damage_source: None,
+            },
+        )
+        .cost(AbilityCost::Tap);
+        let non_mana_json = serde_json::to_value(&non_mana).unwrap();
+        assert!(non_mana_json.get("is_mana_ability").is_none());
+    }
+
+    #[test]
     fn non_mana_api_type_not_detected() {
         let def = AbilityDefinition::new(
             AbilityKind::Activated,
@@ -2807,6 +2870,163 @@ mod tests {
         )
         .cost(AbilityCost::Tap);
         assert!(!is_mana_ability(&def));
+    }
+
+    #[test]
+    fn mana_with_delayed_trigger_sub_remains_mana_ability() {
+        let mut head = make_mana_ability(ManaProduction::Colorless {
+            count: QuantityExpr::Fixed { value: 2 },
+        });
+        head.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::WhenNextEvent {
+                    trigger: Box::new(TriggerDefinition::new(TriggerMode::SpellCast)),
+                    or_trigger: None,
+                },
+                effect: Box::new(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::CopySpell {
+                        target: TargetFilter::TriggeringSource,
+                        retarget: CopyRetargetPermission::KeepOriginalTargets,
+                        copier: None,
+                    },
+                )),
+                uses_tracked_set: false,
+            },
+        )));
+        assert!(
+            is_mana_ability(&head),
+            "CR 605.1: chained delayed triggers do not disqualify activated mana abilities"
+        );
+    }
+
+    #[test]
+    fn resolve_mana_ability_sub_chain_registers_delayed_trigger() {
+        use crate::types::ability::{
+            CopyRetargetPermission, DelayedTriggerCondition, FilterProp, TriggerDefinition,
+            TypedFilter,
+        };
+        use crate::types::triggers::TriggerMode;
+
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Magus Lucea Kane".to_string(),
+            Zone::Battlefield,
+        );
+
+        let copy_effect = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::CopySpell {
+                target: TargetFilter::TriggeringSource,
+                retarget: CopyRetargetPermission::MayChooseNewTargets,
+                copier: None,
+            },
+        );
+        let delayed = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::WhenNextEvent {
+                    trigger: Box::new({
+                        let mut trigger = TriggerDefinition::new(TriggerMode::SpellCast);
+                        trigger.valid_card = Some(TargetFilter::Typed(
+                            TypedFilter::default().properties(vec![FilterProp::HasXInManaCost]),
+                        ));
+                        trigger.valid_target = Some(TargetFilter::Controller);
+                        trigger
+                    }),
+                    or_trigger: None,
+                },
+                effect: Box::new(copy_effect),
+                uses_tracked_set: false,
+            },
+        );
+        let mut def = make_mana_ability(ManaProduction::Colorless {
+            count: QuantityExpr::Fixed { value: 2 },
+        });
+        def.sub_ability = Some(Box::new(delayed));
+
+        let mut events = Vec::new();
+        resolve_mana_ability(&mut state, obj_id, PlayerId(0), &def, &mut events, None).unwrap();
+
+        assert_eq!(state.delayed_triggers.len(), 1);
+        assert!(state.objects.get(&obj_id).unwrap().tapped);
+    }
+
+    #[test]
+    fn mana_with_roll_die_sub_remains_mana_ability() {
+        // CR 605.1: mana abilities remain mana abilities regardless of other
+        // generated effects (Vexing Puzzlebox rolls a d20 inline).
+        let mut def = make_mana_ability(ManaProduction::AnyOneColor {
+            count: QuantityExpr::Fixed { value: 1 },
+            color_options: ManaColor::ALL.to_vec(),
+            contribution: ManaContribution::Base,
+        });
+        def.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::RollDie {
+                count: QuantityExpr::Fixed { value: 1 },
+                sides: 20,
+                results: vec![],
+                modifier: None,
+            },
+        )));
+        assert!(is_mana_ability(&def));
+    }
+
+    #[test]
+    fn resolve_mana_ability_sub_chain_emits_die_rolled() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1011),
+            PlayerId(0),
+            "Vexing Puzzlebox".to_string(),
+            Zone::Battlefield,
+        );
+        let mut def = make_mana_ability(ManaProduction::AnyOneColor {
+            count: QuantityExpr::Fixed { value: 1 },
+            color_options: ManaColor::ALL.to_vec(),
+            contribution: ManaContribution::Base,
+        });
+        def.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::RollDie {
+                count: QuantityExpr::Fixed { value: 1 },
+                sides: 20,
+                results: vec![],
+                modifier: None,
+            },
+        )));
+        let mut events = Vec::new();
+        resolve_mana_ability(&mut state, source, PlayerId(0), &def, &mut events, None).unwrap();
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                GameEvent::DieRolled {
+                    sides: 20,
+                    result: Some(_),
+                    ..
+                }
+            )),
+            "RollDie sub_ability must resolve inline after mana production"
+        );
+    }
+
+    #[test]
+    fn mana_with_mana_sub_remains_mana_ability() {
+        let mut def = make_mana_ability(ManaProduction::Fixed {
+            colors: vec![ManaColor::Blue],
+            contribution: ManaContribution::Base,
+        });
+        def.sub_ability = Some(Box::new(make_mana_ability(ManaProduction::Fixed {
+            colors: vec![ManaColor::Red],
+            contribution: ManaContribution::Base,
+        })));
+        assert!(is_mana_ability(&def));
     }
 
     #[test]
@@ -3122,9 +3342,10 @@ mod tests {
                         ManaColor::Green,
                     ],
                 },
-                restrictions: vec![ManaSpendRestriction::SpellTypeOrAbilityActivation(
-                    "Elemental".to_string(),
-                )],
+                restrictions: vec![ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                    spell_type: "Elemental".to_string(),
+                    ability: crate::types::mana::AbilityActivationScope::OfSpellType,
+                }],
                 grants: vec![],
                 expiry: None,
                 target: None,
@@ -3141,9 +3362,10 @@ mod tests {
             assert_eq!(
                 unit.restrictions,
                 vec![
-                    crate::types::mana::ManaRestriction::OnlyForTypeSpellsOrAbilities(
-                        "Elemental".to_string()
-                    )
+                    crate::types::mana::ManaRestriction::OnlyForTypeSpellsOrAbilities {
+                        spell_type: "Elemental".to_string(),
+                        ability: crate::types::mana::AbilityActivationScope::OfSpellType,
+                    }
                 ],
                 "Flamebraider mana must carry Elemental restriction"
             );
@@ -3560,10 +3782,7 @@ mod tests {
         .cost(AbilityCost::Composite {
             costs: vec![
                 AbilityCost::Tap,
-                AbilityCost::Sacrifice {
-                    target: TargetFilter::SelfRef,
-                    count: 1,
-                },
+                AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
             ],
         });
 
@@ -3618,10 +3837,7 @@ mod tests {
         .cost(AbilityCost::Composite {
             costs: vec![
                 AbilityCost::Tap,
-                AbilityCost::Sacrifice {
-                    target: TargetFilter::SelfRef,
-                    count: 1,
-                },
+                AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
             ],
         });
         Arc::make_mut(&mut state.objects.get_mut(&id).unwrap().abilities).push(def);
@@ -4000,10 +4216,7 @@ mod tests {
             AbilityCost::Composite {
                 costs: vec![
                     AbilityCost::Tap,
-                    AbilityCost::Sacrifice {
-                        target: TargetFilter::SelfRef,
-                        count: 1,
-                    },
+                    AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
                 ],
             }
         )));
@@ -4012,17 +4225,14 @@ mod tests {
 
         // Phyrexian Altar: sacrifice a (non-self) creature → requires a choice.
         assert!(!cost_resolves_without_choice(&Some(
-            AbilityCost::Sacrifice {
-                target: TargetFilter::Typed(TypedFilter::creature()),
-                count: 1,
-            }
+            AbilityCost::Sacrifice(SacrificeCost::count(
+                TargetFilter::Typed(TypedFilter::creature()),
+                1
+            ))
         )));
         // Self-sacrifice of more than one is not the single-token shape.
         assert!(!cost_resolves_without_choice(&Some(
-            AbilityCost::Sacrifice {
-                target: TargetFilter::SelfRef,
-                count: 2,
-            }
+            AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 2))
         )));
         // Filter-land style mana sub-cost requires a payment choice.
         assert!(!cost_resolves_without_choice(&Some(
@@ -4164,10 +4374,7 @@ mod tests {
                     selection: crate::types::ability::CardSelectionMode::Chosen,
                     self_scope: crate::types::ability::DiscardSelfScope::FromHand,
                 },
-                AbilityCost::Sacrifice {
-                    target: TargetFilter::SelfRef,
-                    count: 1,
-                },
+                AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
             ],
         });
         Arc::make_mut(&mut state.objects.get_mut(&led).unwrap().abilities).push(ability.clone());
@@ -7065,10 +7272,10 @@ mod tests {
                 target: None,
             },
         )
-        .cost(AbilityCost::Sacrifice {
-            target: TargetFilter::Typed(TypedFilter::creature()),
-            count: 1,
-        })
+        .cost(AbilityCost::Sacrifice(SacrificeCost::count(
+            TargetFilter::Typed(TypedFilter::creature()),
+            1,
+        )))
     }
 
     fn make_titans_nest_ability() -> AbilityDefinition {

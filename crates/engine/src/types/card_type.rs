@@ -61,6 +61,21 @@ pub enum CoreType {
     Kindred,
     /// CR 309: Dungeons — nontraditional cards that exist in the command zone.
     Dungeon,
+    /// CR 311: Planes — nontraditional cards used in the Planechase variant that
+    /// remain face up in the command zone (CR 311.2).
+    Plane,
+    /// CR 312: Phenomena — nontraditional cards used in the Planechase variant
+    /// that are encountered from the planar deck (CR 312.2).
+    Phenomenon,
+    /// CR 314: Schemes — nontraditional cards used in the Archenemy variant that
+    /// remain in the command zone (CR 314.2) and are set in motion from the
+    /// scheme deck (CR 904.9).
+    Scheme,
+    /// CR 905: Conspiracies — nontraditional cards used in the Conspiracy Draft
+    /// variant that exist only in the command zone (CR 905.4), where a face-up
+    /// conspiracy applies its abilities and a hidden-agenda conspiracy
+    /// (CR 905.4a + CR 702.106) starts face down.
+    Conspiracy,
 }
 
 impl FromStr for CoreType {
@@ -79,6 +94,10 @@ impl FromStr for CoreType {
             "Battle" => Ok(CoreType::Battle),
             "Kindred" => Ok(CoreType::Kindred),
             "Dungeon" => Ok(CoreType::Dungeon),
+            "Plane" => Ok(CoreType::Plane),
+            "Phenomenon" => Ok(CoreType::Phenomenon),
+            "Scheme" => Ok(CoreType::Scheme),
+            "Conspiracy" => Ok(CoreType::Conspiracy),
             _ => Err(()),
         }
     }
@@ -98,6 +117,10 @@ impl fmt::Display for CoreType {
             CoreType::Battle => write!(f, "Battle"),
             CoreType::Kindred => write!(f, "Kindred"),
             CoreType::Dungeon => write!(f, "Dungeon"),
+            CoreType::Plane => write!(f, "Plane"),
+            CoreType::Phenomenon => write!(f, "Phenomenon"),
+            CoreType::Scheme => write!(f, "Scheme"),
+            CoreType::Conspiracy => write!(f, "Conspiracy"),
         }
     }
 }
@@ -148,7 +171,14 @@ impl CoreType {
             CoreType::Sorcery => Some("sorcery"),
             CoreType::Planeswalker => Some("planeswalker"),
             CoreType::Land => Some("land"),
-            CoreType::Tribal | CoreType::Battle | CoreType::Kindred | CoreType::Dungeon => None,
+            CoreType::Tribal
+            | CoreType::Battle
+            | CoreType::Kindred
+            | CoreType::Dungeon
+            | CoreType::Plane
+            | CoreType::Phenomenon
+            | CoreType::Scheme
+            | CoreType::Conspiracy => None,
         }
     }
 }
@@ -391,10 +421,14 @@ mod tests {
             Some("planeswalker")
         );
         assert_eq!(CoreType::Land.protection_quality_str(), Some("land"));
-        // 4 None — supplemental types never offered as a chosen card type.
+        // 7 None — supplemental types never offered as a chosen card type.
         assert_eq!(CoreType::Tribal.protection_quality_str(), None);
         assert_eq!(CoreType::Battle.protection_quality_str(), None);
         assert_eq!(CoreType::Kindred.protection_quality_str(), None);
         assert_eq!(CoreType::Dungeon.protection_quality_str(), None);
+        assert_eq!(CoreType::Plane.protection_quality_str(), None);
+        assert_eq!(CoreType::Phenomenon.protection_quality_str(), None);
+        assert_eq!(CoreType::Scheme.protection_quality_str(), None);
+        assert_eq!(CoreType::Conspiracy.protection_quality_str(), None);
     }
 }

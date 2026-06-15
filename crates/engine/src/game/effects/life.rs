@@ -406,46 +406,59 @@ pub fn resolve_set_life_total(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let amount = match &ability.effect {
-        Effect::SetLifeTotal { amount, .. } => {
-            crate::game::quantity::resolve_quantity_with_targets(state, amount, ability)
-        }
+    let (amount_expr, target) = match &ability.effect {
+        Effect::SetLifeTotal { amount, target } => (amount, target),
         _ => return Err(EffectError::MissingParam("SetLifeTotal amount".to_string())),
     };
+    let amount = crate::game::quantity::resolve_quantity_with_targets(state, amount_expr, ability);
 
-    let target_player_id = ability
-        .targets
-        .iter()
-        .find_map(|t| {
-            if let TargetRef::Player(pid) = t {
-                Some(*pid)
-            } else {
-                None
-            }
-        })
-        .unwrap_or(ability.controller);
-
-    let current_life = state
-        .players
-        .iter()
-        .find(|p| p.id == target_player_id)
-        .ok_or(EffectError::PlayerNotFound)?
-        .life;
-    let diff = amount - current_life;
-
-    // CR 119.5: Decompose into the matching gain/loss event. A diff of 0 is a
-    // no-op. apply_life_gain / apply_damage_life_loss each handle their own
-    // CR 119.7 / CR 119.8 short-circuits and replacement pipeline routing.
-    let deferred = match diff.signum() {
-        1 => apply_life_gain(state, target_player_id, diff as u32, events).err(),
-        -1 => apply_damage_life_loss(state, target_player_id, (-diff) as u32, events).err(),
-        _ => None,
+    // CR 119.5 + CR 608.2f: Resolve which players' life totals are set. The
+    // common single-player forms ("your" → Controller, "target player's" →
+    // the chosen target) preserve the original single-player behavior. The
+    // non-targeted all-players form ("each player's life total becomes N" —
+    // Worldfire, issue #2882) expands to every player in APNAP order.
+    let target_player_ids: Vec<PlayerId> = if matches!(target, TargetFilter::AllPlayers) {
+        crate::game::players::apnap_order(state)
+    } else {
+        vec![ability
+            .targets
+            .iter()
+            .find_map(|t| {
+                if let TargetRef::Player(pid) = t {
+                    Some(*pid)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(ability.controller)]
     };
-    if deferred.is_some() {
-        // CR 614.7: A competing replacement required a player choice; the
-        // helper already installed the WaitingFor state. Return without
-        // emitting EffectResolved — the resume path will complete resolution.
-        return Ok(());
+
+    // CR 119.5: Set each player's life total one at a time, decomposing into the
+    // matching gain/loss event. apply_life_gain / apply_damage_life_loss each
+    // handle their own CR 119.7 / CR 119.8 short-circuits and replacement
+    // pipeline routing.
+    for target_player_id in target_player_ids {
+        let current_life = state
+            .players
+            .iter()
+            .find(|p| p.id == target_player_id)
+            .map(|p| p.life)
+            .ok_or(EffectError::PlayerNotFound)?;
+        let diff = amount - current_life;
+
+        let deferred = match diff.signum() {
+            1 => apply_life_gain(state, target_player_id, diff as u32, events).err(),
+            -1 => apply_damage_life_loss(state, target_player_id, (-diff) as u32, events).err(),
+            _ => None,
+        };
+        if deferred.is_some() {
+            // CR 614.7: A competing replacement required a player choice; the
+            // helper already installed the WaitingFor state. Return without
+            // emitting EffectResolved — the resume path completes resolution.
+            // (A multi-player set that hits a replacement mid-list defers from
+            // that player onward, mirroring the original single-player path.)
+            return Ok(());
+        }
     }
 
     events.push(GameEvent::EffectResolved {
@@ -512,6 +525,34 @@ mod tests {
         resolve_gain(&mut state, &ability, &mut events).unwrap();
 
         assert_eq!(state.players[0].life, 25);
+    }
+
+    #[test]
+    fn set_life_total_all_players_sets_every_player_no_target() {
+        // CR 119.5 + issue #2882: Worldfire's "Each player's life total becomes 1"
+        // must set EVERY player to 1 with no targeting prompt — not just the
+        // controller and not a single chosen player.
+        let mut state = GameState::new_two_player(42);
+        state.players[0].life = 20;
+        state.players[1].life = 15;
+        let ability = ResolvedAbility::new(
+            Effect::SetLifeTotal {
+                target: TargetFilter::AllPlayers,
+                amount: QuantityExpr::Fixed { value: 1 },
+            },
+            vec![], // no Player targets — AllPlayers is a non-targeted scope
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve_set_life_total(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.players[0].life, 1,
+            "controller's life should become 1"
+        );
+        assert_eq!(state.players[1].life, 1, "opponent's life should become 1");
     }
 
     #[test]
@@ -604,6 +645,42 @@ mod tests {
         resolve_lose(&mut state, &ability, &mut events).unwrap();
 
         assert_eq!(state.players[1].life, 17);
+    }
+
+    /// CR 115.1 + CR 119.3: Astarion, the Decadent (Feed mode) — "Target
+    /// opponent loses life equal to the amount of life they lost this turn."
+    /// The third-person "they" anaphor is the effect's player target, so the
+    /// amount resolves through `PlayerScope::Target` (the target's *own*
+    /// `life_lost_this_turn`), NOT the controller's. The controller's count is
+    /// seeded high as a trap: a `Controller`-scoped resolution would drain the
+    /// target by 99 instead of 3.
+    #[test]
+    fn lose_life_amount_target_relative_life_lost_this_turn() {
+        use crate::types::ability::PlayerScope;
+        let mut state = GameState::new_two_player(42);
+        state.players[0].life_lost_this_turn = 99; // controller — must be ignored
+        state.players[1].life_lost_this_turn = 3; // target opponent
+        let ability = ResolvedAbility::new(
+            Effect::LoseLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::LifeLostThisTurn {
+                        player: PlayerScope::Target,
+                    },
+                },
+                target: None,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve_lose(&mut state, &ability, &mut events).unwrap();
+
+        // Target opponent (20 starting) loses 3 — their own life lost this turn.
+        assert_eq!(state.players[1].life, 17);
+        // Controller is untouched (it is the source, not a target/recipient).
+        assert_eq!(state.players[0].life, 20);
     }
 
     #[test]
@@ -1061,6 +1138,115 @@ mod tests {
             state.players[1].life,
             p1_life_before - 2,
             "opponent must lose 2 life"
+        );
+    }
+
+    /// CR 119.3 + CR 109.5: Genesis of the Daleks chapter IV — "...and each of
+    /// your opponents loses life equal to ...". End-to-end resolution guard for
+    /// the parser fix that lifts the "each of your opponents" subject onto the
+    /// sub_ability's `player_scope` (leaving `LoseLife.target: None`) instead of
+    /// stamping a non-resolvable `Typed(controller=Opponent)` target.
+    ///
+    /// This drives the actual parsed encoding through `resolve_ability_chain`:
+    /// the controller (p0) must NOT lose life and the opponent (p1) MUST. The
+    /// AST-only parser test (`genesis_villainous_branch_splits_destroy_and_lose_life`)
+    /// asserts the shape; this test asserts the runtime routing, closing the
+    /// path-divergence gap where a green AST test masked the inverse drain.
+    #[test]
+    fn genesis_each_opponent_loses_life_drains_opponent() {
+        use crate::game::effects::resolve_ability_chain;
+        use crate::types::ability::PlayerFilter;
+
+        let mut state = GameState::new_two_player(42);
+        let p0_life_before = state.players[0].life;
+        let p1_life_before = state.players[1].life;
+
+        // Genesis branch-1 LoseLife encoding: undirected `target: None` with the
+        // each-opponent scope lifted onto the ability (the post-fix shape). The
+        // amount is fixed here — the bug under test is target routing, not amount
+        // resolution (the dynamic `ZoneChangeAggregateThisTurn` amount is covered
+        // by the AST parser test).
+        let mut ability = ResolvedAbility::new(
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 5 },
+                target: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.player_scope = Some(PlayerFilter::Opponent);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert_eq!(
+            state.players[0].life, p0_life_before,
+            "Genesis's controller (p0) must NOT lose life — the each-opponent \
+             scope routes the loss to opponents, not the source controller"
+        );
+        assert_eq!(
+            state.players[1].life,
+            p1_life_before - 5,
+            "each opponent (p1) must lose 5 life"
+        );
+    }
+
+    /// CR 115.10a + CR 119.3 + CR 608.2c (Wound Reflection / Archfiend of Despair /
+    /// Warlock Class L3): "each opponent loses life equal to the life they lost
+    /// this turn" resolves with a `LifeLostThisTurn { ScopedPlayer }` amount under
+    /// `player_scope: Opponent`. Each iterated opponent must lose its OWN life lost
+    /// this turn — NOT the source controller's. The controller's count is seeded
+    /// high (99) as a trap: the prior `Controller`-scoped encoding drained every
+    /// opponent by 99. This is the canonical runtime regression guard for the
+    /// reported bug; the parser fix is covered in oracle_effect/mod.rs.
+    #[test]
+    fn each_opponent_loses_own_life_lost_uses_scoped_player() {
+        use crate::game::effects::resolve_ability_chain;
+        use crate::types::ability::{PlayerFilter, PlayerScope};
+
+        // 3-player game so two distinct opponents prove per-iteration scoping.
+        let mut state = GameState::new(crate::types::FormatConfig::standard(), 3, 42);
+        state.players[0].life_lost_this_turn = 99; // controller — trap, must be ignored
+        state.players[1].life_lost_this_turn = 3; // opponent A
+        state.players[2].life_lost_this_turn = 5; // opponent B
+        let p0_life_before = state.players[0].life;
+        let p1_life_before = state.players[1].life;
+        let p2_life_before = state.players[2].life;
+
+        let mut ability = ResolvedAbility::new(
+            Effect::LoseLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::LifeLostThisTurn {
+                        player: PlayerScope::ScopedPlayer,
+                    },
+                },
+                target: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.player_scope = Some(PlayerFilter::Opponent);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        // Controller untouched — it is the source, not an affected opponent.
+        assert_eq!(
+            state.players[0].life, p0_life_before,
+            "controller must not lose life — the trap value (99) must be ignored"
+        );
+        // Each opponent loses ITS OWN life lost this turn (3 and 5), not 99.
+        assert_eq!(
+            state.players[1].life,
+            p1_life_before - 3,
+            "opponent A must lose its own life lost (3), not the controller's 99"
+        );
+        assert_eq!(
+            state.players[2].life,
+            p2_life_before - 5,
+            "opponent B must lose its own life lost (5), not the controller's 99"
         );
     }
 

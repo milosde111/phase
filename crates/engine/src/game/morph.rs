@@ -1,5 +1,5 @@
 use crate::types::ability::{
-    AbilityDefinition, ReplacementDefinition, StaticDefinition, TriggerDefinition,
+    AbilityDefinition, FaceDownBody, ReplacementDefinition, StaticDefinition, TriggerDefinition,
 };
 use crate::types::card_type::{CardType, CoreType};
 use crate::types::events::GameEvent;
@@ -35,11 +35,15 @@ pub struct FaceDownData {
 /// down permanents default to 2/2 creatures with no name, subtypes, mana cost,
 /// color, abilities, or rules text.
 ///
-/// `profile` is the "otherwise specified by the effect" override from CR 708.2a:
-/// power/toughness default to 2 when `None`, `Creature` is always present in the
-/// core types (CR 708.2a), and any `extra_core_types`/`subtypes` the effect
-/// listed are applied on top (CR 205.1a). `FaceDownProfile::vanilla_2_2()`
-/// reproduces the manifest/morph default.
+/// `profile` is the "otherwise specified by the effect" override from CR 708.2a.
+/// For a `FaceDownBody::Creature` profile, power/toughness default to 2 when
+/// `None`, `Creature` is always present in the core types, and any
+/// `extra_core_types`/`subtypes` the effect listed are applied on top
+/// (CR 205.1a); `FaceDownProfile::vanilla_2_2()` reproduces the manifest/morph
+/// default. For a `FaceDownBody::Noncreature` profile (CR 708.2a sentence 2 —
+/// e.g. Yedora's "It's a Forest land."), the core types come entirely from
+/// `extra_core_types`, there is no implicit Creature type, and the permanent has
+/// no power/toughness (CR 208.1).
 pub fn apply_face_down_creature_characteristics(
     obj: &mut crate::game::game_object::GameObject,
     profile: &crate::types::ability::FaceDownProfile,
@@ -47,21 +51,34 @@ pub fn apply_face_down_creature_characteristics(
     obj.face_down = true;
     obj.name = String::new();
     obj.base_name = String::new();
-    // CR 708.2a: power/toughness default to 2 unless the effect specifies otherwise.
-    let power = profile.power.unwrap_or(2);
-    let toughness = profile.toughness.unwrap_or(2);
-    obj.power = Some(power);
-    obj.toughness = Some(toughness);
-    obj.base_power = Some(power);
-    obj.base_toughness = Some(toughness);
-    // CR 708.2a + CR 205.1a: Creature is always present; the effect may add
-    // further core types (e.g. Artifact) without removing Creature.
-    let mut core_types = vec![CoreType::Creature];
+    // CR 708.2a + CR 205.1a: assemble the face-down core-type set. A creature
+    // body (morph/manifest default, CR 708.2a sentence 1) always carries the
+    // Creature core type with the effect's extra types layered on top. A
+    // non-creature body (CR 708.2a sentence 2 — "It's a Forest land.") takes its
+    // core types entirely from the effect, with no implicit Creature.
+    let mut core_types = match profile.body {
+        FaceDownBody::Creature => vec![CoreType::Creature],
+        FaceDownBody::Noncreature => Vec::new(),
+    };
     for ct in &profile.extra_core_types {
         if !core_types.contains(ct) {
             core_types.push(*ct);
         }
     }
+    // CR 208.1 + CR 708.2a: only a creature body has power/toughness — it
+    // defaults to 2/2 unless the effect specifies otherwise. A non-creature
+    // body (a Forest land) has no power/toughness.
+    let (power, toughness) = match profile.body {
+        FaceDownBody::Creature => (
+            Some(profile.power.unwrap_or(2)),
+            Some(profile.toughness.unwrap_or(2)),
+        ),
+        FaceDownBody::Noncreature => (profile.power, profile.toughness),
+    };
+    obj.power = power;
+    obj.toughness = toughness;
+    obj.base_power = power;
+    obj.base_toughness = toughness;
     obj.card_types = CardType {
         supertypes: vec![],
         core_types,
@@ -70,8 +87,15 @@ pub fn apply_face_down_creature_characteristics(
     obj.base_card_types = obj.card_types.clone();
     obj.mana_cost = ManaCost::NoCost;
     obj.base_mana_cost = ManaCost::NoCost;
-    obj.keywords = Vec::new();
-    obj.base_keywords = Vec::new();
+    // CR 701.58a: A cloaked permanent enters with ward {2}; plain manifest/morph
+    // grants no keywords. The ward rides the face-down state and is replaced by
+    // the real card's keywords when the card is turned face up.
+    let face_down_keywords: Vec<Keyword> = match &profile.ward {
+        Some(cost) => vec![Keyword::Ward(cost.clone())],
+        None => Vec::new(),
+    };
+    obj.keywords = face_down_keywords.clone();
+    obj.base_keywords = face_down_keywords;
     obj.abilities = Arc::new(Vec::new());
     obj.base_abilities = Arc::new(Vec::new());
     obj.trigger_definitions = crate::types::definitions::Definitions::default();
@@ -235,10 +259,14 @@ pub fn turn_face_up(
 /// 2. Moves it to the battlefield
 /// 3. Applies face-down 2/2 creature overrides
 /// 4. Stores originals in `back_face` for later turn-face-up
+///
+/// `source_id` is the spell or ability source responsible for the manifest entry.
 pub fn manifest_card(
     state: &mut GameState,
     _player: PlayerId,
     object_id: ObjectId,
+    source_id: ObjectId,
+    profile: crate::types::ability::FaceDownProfile,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
     if !state.objects.contains_key(&object_id) {
@@ -263,8 +291,8 @@ pub fn manifest_card(
     // resumes face down with nothing left for this helper to do.
     match super::zone_pipeline::move_object(
         state,
-        super::zone_pipeline::ZoneMoveRequest::effect(object_id, Zone::Battlefield, object_id)
-            .face_down(crate::types::ability::FaceDownProfile::vanilla_2_2()),
+        super::zone_pipeline::ZoneMoveRequest::effect(object_id, Zone::Battlefield, source_id)
+            .face_down(profile),
         events,
     ) {
         super::zone_pipeline::ZoneMoveResult::Done => Ok(()),
@@ -273,28 +301,22 @@ pub fn manifest_card(
     }
 }
 
-/// CR 701.40a: Manifest puts the top card of library onto battlefield face down as a 2/2 creature.
-///
-/// If the manifested card is a creature, it can later be turned face up by paying its mana cost.
-pub fn manifest(
-    state: &mut GameState,
-    player: PlayerId,
-    events: &mut Vec<GameEvent>,
-) -> Result<(), EngineError> {
+/// Find the object id of the top card of `player`'s library, if any.
+fn top_library_object(state: &GameState, player: PlayerId) -> Result<ObjectId, EngineError> {
     let player_state = state
         .players
         .iter()
         .find(|p| p.id == player)
         .ok_or_else(|| EngineError::InvalidAction("Player not found".to_string()))?;
 
-    let top_card_id = player_state
+    let _top_card_id = player_state
         .library
         .front()
         .copied()
         .ok_or_else(|| EngineError::InvalidAction("Library is empty".to_string()))?;
 
     // Find the object that corresponds to this library entry
-    let object_id = state
+    state
         .objects
         .iter()
         .find(|(_, obj)| {
@@ -308,11 +330,45 @@ pub fn manifest(
                     .unwrap_or(false)
         })
         .map(|(id, _)| *id)
-        .ok_or_else(|| EngineError::InvalidAction("Top card object not found".to_string()))?;
+        .ok_or_else(|| EngineError::InvalidAction("Top card object not found".to_string()))
+}
 
-    let _ = top_card_id; // used for finding the object above
+/// CR 701.40a: Manifest puts the top card of library onto battlefield face down as a 2/2 creature.
+///
+/// If the manifested card is a creature, it can later be turned face up by paying its mana cost.
+pub fn manifest(
+    state: &mut GameState,
+    player: PlayerId,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
+    let object_id = top_library_object(state, player)?;
+    manifest_card(
+        state,
+        player,
+        object_id,
+        object_id,
+        crate::types::ability::FaceDownProfile::vanilla_2_2(),
+        events,
+    )
+}
 
-    manifest_card(state, player, object_id, events)
+/// CR 701.58a: Cloak puts the top card of library onto the battlefield face
+/// down as a 2/2 creature **with ward {2}**. Like manifest, a cloaked creature
+/// card can later be turned face up for its mana cost.
+pub fn cloak(
+    state: &mut GameState,
+    player: PlayerId,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
+    let object_id = top_library_object(state, player)?;
+    manifest_card(
+        state,
+        player,
+        object_id,
+        object_id,
+        crate::types::ability::FaceDownProfile::cloaked_2_2(),
+        events,
+    )
 }
 
 #[cfg(test)]
@@ -710,8 +766,10 @@ mod tests {
         let profile = crate::types::ability::FaceDownProfile {
             power: Some(2),
             toughness: Some(2),
+            body: crate::types::ability::FaceDownBody::Creature,
             extra_core_types: vec![CoreType::Artifact],
             subtypes: vec!["Cyberman".to_string()],
+            ward: None,
         };
         {
             let obj = state.objects.get_mut(&id).unwrap();

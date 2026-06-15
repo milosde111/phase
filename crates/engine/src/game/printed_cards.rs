@@ -5,7 +5,7 @@ use crate::types::ability::{
     TriggerDefinition,
 };
 use crate::types::card::{CardFace, CardLayout, LayoutKind, PrintedCardRef};
-use crate::types::card_type::CoreType;
+use crate::types::card_type::{CardType, CoreType};
 use crate::types::counter::CounterType;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
@@ -347,6 +347,31 @@ pub fn intrinsic_face_counters(
     counters
 }
 
+/// CR 714.3a: A Saga entering the battlefield puts a lore counter on it.
+fn intrinsic_saga_lore_counter(card_types: &CardType) -> Option<(CounterType, u32)> {
+    if card_types.subtypes.iter().any(|s| s == "Saga") {
+        Some((CounterType::Lore, 1))
+    } else {
+        None
+    }
+}
+
+/// CR 306.5b + CR 310.4b + CR 714.3a: Intrinsic counters for the face a
+/// permanent will have on entry — loyalty/defense from the entering face plus
+/// the Saga lore counter when the entering face is a Saga (CR 712.14a
+/// transformed entry reads the back face here before the physical swap).
+pub fn intrinsic_entry_counters_for_face(
+    loyalty: Option<u32>,
+    defense: Option<u32>,
+    card_types: &CardType,
+) -> Vec<(CounterType, u32)> {
+    let mut counters = intrinsic_face_counters(loyalty, defense);
+    if let Some(lore) = intrinsic_saga_lore_counter(card_types) {
+        counters.push(lore);
+    }
+    counters
+}
+
 pub fn intrinsic_etb_counters(obj: &GameObject) -> Vec<(CounterType, u32)> {
     let mut counters = intrinsic_face_counters(obj.loyalty, obj.defense);
     // CR 702.156a + CR 107.3m: Ravenous is an intrinsic ETB replacement
@@ -379,6 +404,37 @@ pub fn intrinsic_copiable_values(obj: &GameObject) -> CopiableValues {
         trigger_definitions: Arc::clone(&obj.base_trigger_definitions),
         replacement_definitions: Arc::clone(&obj.base_replacement_definitions),
         static_definitions: Arc::clone(&obj.base_static_definitions),
+    }
+}
+
+/// CR 707.2 + CR 712.4b: Build the copiable values for a melded permanent
+/// DIRECTLY from the `result` card's face. Meld is LAYER-ONLY: this converter
+/// feeds `install_merge_layer_effect`, so the melded permanent presents the
+/// combined back faces (the named result card) WITHOUT mutating the survivor's
+/// `base_*` — each component returns as its own front face on leave (CR 712.21).
+/// Parameterized over any result face (a building block, not a per-card path);
+/// mirrors `apply_card_face_to_object`'s field derivations without writing base.
+///
+/// Also used by `CreateTokenCopyFromPool` (Momir Basic) to build copiable values
+/// for a creature card chosen from the format pool, which exists only as a
+/// `CardFace` (no battlefield object to read via `compute_current_copiable_values`).
+pub(crate) fn copiable_values_from_face(result_face: &CardFace) -> CopiableValues {
+    CopiableValues {
+        name: result_face.name.clone(),
+        mana_cost: result_face.mana_cost.clone(),
+        color: printed_colors_from_face(result_face),
+        card_types: result_face.card_type.clone(),
+        power: parse_pt(&result_face.power),
+        toughness: parse_pt(&result_face.toughness),
+        loyalty: result_face
+            .loyalty
+            .as_ref()
+            .and_then(|value| value.parse::<u32>().ok()),
+        keywords: result_face.keywords.clone(),
+        abilities: Arc::new(result_face.abilities.clone()),
+        trigger_definitions: Arc::new(result_face.triggers.clone()),
+        replacement_definitions: Arc::new(result_face.replacements.clone()),
+        static_definitions: Arc::new(result_face.static_abilities.clone()),
     }
 }
 
@@ -531,7 +587,11 @@ fn walk_continuous_mod(modification: &ContinuousModification, out: &mut Vec<Stri
         ContinuousModification::GrantStaticAbility { definition } => walk_static(definition, out),
         ContinuousModification::CopyValues { values, .. } => walk_copiable_values(values, out),
         // Remaining modifications carry no nested ability/effect carriers.
-        ContinuousModification::SetName { .. }
+        // GrantAllActivatedAbilitiesOf only holds a source `TargetFilter`; the
+        // granted abilities are pulled live from the provider objects at layer
+        // collection time, not nested here.
+        ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
+        | ContinuousModification::SetName { .. }
         | ContinuousModification::AddPower { .. }
         | ContinuousModification::AddToughness { .. }
         | ContinuousModification::SetPower { .. }
@@ -558,6 +618,7 @@ fn walk_continuous_mod(modification: &ContinuousModification, out: &mut Vec<Stri
         | ContinuousModification::AddChosenSubtype { .. }
         | ContinuousModification::AddChosenColor
         | ContinuousModification::RemoveChosenKeyword
+        | ContinuousModification::AddChosenKeyword
         | ContinuousModification::SetColor { .. }
         | ContinuousModification::AddColor { .. }
         | ContinuousModification::AddStaticMode { .. }
@@ -607,7 +668,7 @@ fn walk_cost(cost: &AbilityCost, out: &mut Vec<String>) {
         | AbilityCost::Tap
         | AbilityCost::Untap
         | AbilityCost::Loyalty { .. }
-        | AbilityCost::Sacrifice { .. }
+        | AbilityCost::Sacrifice(_)
         | AbilityCost::PayLife { .. }
         | AbilityCost::Discard { .. }
         | AbilityCost::Exile { .. }
@@ -650,11 +711,19 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
                 }
             }
         }
+        // CR 701.42 / CR 712.4b: the melded permanent presents the `result`
+        // card's characteristics, but `result` is an outside-the-game third card.
+        // Seed its name so `build_conjure_registry` preloads its `CardFace` into
+        // `card_face_registry`. `source` and `partner` are live battlefield
+        // objects the resolver finds by printed identity — they need no registry
+        // seeding.
+        Effect::Meld { result, .. } => out.push(result.clone()),
         // A spellbook draft conjures the chosen card, but the list lives on the
         // card face (`metadata.spellbook`), not in the effect — the registry
         // seed collects it directly from the face (see
         // `collect_conjure_names_from_face`), so nothing to gather here.
         Effect::DraftFromSpellbook { .. } => {}
+        Effect::TurnFaceUp { .. } => {}
         // Nested-ability carriers — descend.
         Effect::Vote {
             per_choice_effect, ..
@@ -766,6 +835,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::ChangeZoneAll { .. }
         | Effect::Dig { .. }
         | Effect::GainControl { .. }
+        | Effect::GainControlAll { .. }
         | Effect::ControlNextTurn { .. }
         | Effect::Attach { .. }
         | Effect::UnattachAll { .. }
@@ -790,6 +860,10 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::EpicCopy { .. }
         | Effect::CastCopyOfCard { .. }
         | Effect::CopyTokenOf { .. }
+        // owner/type_filter are TargetFilters; no nested ability carrier and the
+        // copy source comes from the format pool, so this is a leaf for conjure
+        // collection.
+        | Effect::CreateTokenCopyFromPool { .. }
         | Effect::Myriad
         | Effect::Encore
         | Effect::ExileHaunting { .. }
@@ -844,6 +918,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::VentureIntoDungeon
         | Effect::VentureInto { .. }
         | Effect::TakeTheInitiative
+        | Effect::Planeswalk
         | Effect::OpenAttractions { .. }
         | Effect::RollToVisitAttractions
         | Effect::ProcessRadCounters
@@ -873,6 +948,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::ChangeTargets { .. }
         | Effect::Manifest { .. }
         | Effect::ManifestDread
+        | Effect::Cloak { .. }
         | Effect::ExtraTurn { .. }
         | Effect::GrantExtraLoyaltyActivations { .. }
         | Effect::SkipNextTurn { .. }
@@ -1091,6 +1167,37 @@ fn rehydrate_card_db_metadata(state: &mut GameState, db: &CardDatabase) {
     // game is restored from a persisted snapshot, deadlocking the session.
     if state.all_card_names.is_empty() {
         state.all_card_names = db.card_names().into();
+    }
+
+    // CR 707.2 + CR 202.3: Build the Momir Basic random-token pool. Gated on the
+    // format AND emptiness: `rehydrate_card_db_metadata` also runs on the
+    // mid-game debug-spawn path (engine-wasm), so without the emptiness guard we
+    // would rescan the full creature corpus on every spawn. The deserialize case
+    // is covered — `format_config` is serialized, so a peer deserializing a Momir
+    // game sees `format == Momir && momir_pool.is_empty()` and rebuilds the same
+    // pool from its own copy of the card DB (the keys are sorted, so the index is
+    // deterministic across peers).
+    if state.format_config.format == crate::types::format::GameFormat::Momir
+        && state.momir_pool.is_empty()
+    {
+        let mut pool: std::collections::BTreeMap<i32, Vec<String>> =
+            std::collections::BTreeMap::new();
+        let mut faces: HashMap<String, CardFace> = HashMap::new();
+        for face in db
+            .face_index
+            .values()
+            .filter(|face| face.card_type.core_types.contains(&CoreType::Creature))
+        {
+            let mv = face.mana_cost.mana_value() as i32;
+            pool.entry(mv).or_default().push(face.name.clone());
+            faces.insert(face.name.to_lowercase(), face.clone());
+        }
+        // Deterministic selection order regardless of DB iteration order.
+        for names in pool.values_mut() {
+            names.sort();
+        }
+        state.momir_pool = pool;
+        state.momir_pool_faces = std::sync::Arc::new(faces);
     }
 }
 

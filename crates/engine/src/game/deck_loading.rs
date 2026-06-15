@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
@@ -96,16 +96,14 @@ pub struct DeckList {
 /// Resolve a flat name list into DeckEntry entries using the card database.
 /// Groups duplicate names and skips unresolvable names.
 fn resolve_names(db: &CardDatabase, names: &[String]) -> Vec<DeckEntry> {
-    let mut counts: HashMap<&str, u32> = HashMap::new();
+    let mut entries: Vec<DeckEntry> = Vec::new();
     for name in names {
-        *counts.entry(name.as_str()).or_insert(0) += 1;
-    }
-    let mut entries = Vec::new();
-    for (name, count) in counts {
-        if let Some(face) = db.get_face_by_name(name) {
+        if let Some(index) = entries.iter().position(|entry| entry.card.name == *name) {
+            entries[index].count += 1;
+        } else if let Some(face) = db.get_face_by_name(name) {
             entries.push(DeckEntry {
                 card: face.clone(),
-                count,
+                count: 1,
             });
         }
     }
@@ -186,6 +184,71 @@ pub fn create_object_from_card_face(
     apply_card_face_to_object(obj, card_face);
 
     obj_id
+}
+
+/// Build the Momir Basic emblem's activated ability programmatically (no Oracle
+/// text — emblems have no card to parse). CR 113.1b + CR 114.4:
+/// "{X}, Discard a card: Create a token that's a copy of a creature card with
+/// mana value X chosen at random. Activate only any time you could cast a sorcery
+/// and only once each turn."
+pub fn momir_emblem_ability() -> crate::types::ability::AbilityDefinition {
+    use crate::types::ability::{
+        AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, CardSelectionMode,
+        Comparator, DiscardSelfScope, Effect, QuantityExpr, QuantityRef, TargetFilter,
+    };
+    use crate::types::mana::{ManaCost, ManaCostShard};
+
+    // CR 707.2 + CR 202.3 + CR 701.9a (analogous): random copy of a creature card
+    // whose mana value equals the X paid.
+    let effect = Effect::CreateTokenCopyFromPool {
+        owner: TargetFilter::Controller,
+        type_filter: TargetFilter::Any,
+        mv: Comparator::EQ,
+        mv_bound: QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        },
+        selection: CardSelectionMode::Random,
+        count: QuantityExpr::Fixed { value: 1 },
+        tapped: false,
+        enters_attacking: false,
+    };
+
+    // Cost: {X} + discard a card. CR 107.3 (X) + CR 701.9a (discard).
+    let cost = AbilityCost::Composite {
+        costs: vec![
+            AbilityCost::Mana {
+                cost: ManaCost::Cost {
+                    shards: vec![ManaCostShard::X],
+                    generic: 0,
+                },
+            },
+            AbilityCost::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                filter: None,
+                selection: CardSelectionMode::Chosen,
+                self_scope: DiscardSelfScope::FromHand,
+            },
+        ],
+    };
+
+    let mut ability = AbilityDefinition::new(AbilityKind::Activated, effect)
+        .cost(cost)
+        // CR 307.5 (sorcery speed) + CR 602.5b (once each turn).
+        .activation_restrictions(vec![
+            ActivationRestriction::AsSorcery,
+            ActivationRestriction::OnlyOnceEachTurn,
+        ])
+        .description(
+            "{X}, Discard a card: Create a token that's a copy of a creature card \
+             with mana value X chosen at random. Activate only as a sorcery and \
+             only once each turn."
+                .to_string(),
+        );
+    // CR 114.4: the ability functions (and is activated) from the command zone.
+    ability.activation_zone = Some(Zone::Command);
+    ability
 }
 
 /// Create a commander GameObject from a CardFace, placing it in the command zone.
@@ -409,6 +472,25 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
             for _ in 0..entry.count {
                 create_signature_spell_from_card_face(state, &entry.card, owner);
             }
+        }
+    }
+
+    // Momir Basic: grant each player a game-start command-zone emblem carrying
+    // the random-creature-token activated ability (CR 114.1 / CR 113.1b). The
+    // grant runs BEFORE `rehydrate_game_from_card_db` populates the Momir pool
+    // (in `load_and_hydrate_decks`); this ordering is correct ONLY because
+    // `grant_emblem` does not read `momir_pool` / `momir_pool_faces` — those are
+    // resolution-time-only reads inside the effect resolver.
+    if state.format_config.format == crate::types::format::GameFormat::Momir {
+        for i in 0..state.players.len() {
+            let player = PlayerId(i as u8);
+            crate::game::effects::create_emblem::grant_emblem(
+                state,
+                player,
+                Vec::new(),
+                Vec::new(),
+                vec![momir_emblem_ability()],
+            );
         }
     }
 

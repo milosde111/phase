@@ -41,8 +41,15 @@ pub fn resolve(
     if count == 1 {
         // Only one card — must manifest it (no choice needed)
         let card_id = cards[0];
-        crate::game::morph::manifest_card(state, player, card_id, events)
-            .map_err(|e| EffectError::MissingParam(format!("{e}")))?;
+        crate::game::morph::manifest_card(
+            state,
+            player,
+            card_id,
+            ability.source_id,
+            crate::types::ability::FaceDownProfile::vanilla_2_2(),
+            events,
+        )
+        .map_err(|e| EffectError::MissingParam(format!("{e}")))?;
     } else {
         // CR 701.62a: Player chooses which card to manifest
         // Mark these cards as revealed to the controller only
@@ -50,7 +57,11 @@ pub fn resolve(
             state.revealed_cards.insert(card_id);
         }
 
-        state.waiting_for = WaitingFor::ManifestDreadChoice { player, cards };
+        state.waiting_for = WaitingFor::ManifestDreadChoice {
+            player,
+            cards,
+            source_id: ability.source_id,
+        };
     }
 
     events.push(GameEvent::EffectResolved {
@@ -99,7 +110,9 @@ mod tests {
         resolve(&mut state, &ability, &mut events).unwrap();
 
         match &state.waiting_for {
-            WaitingFor::ManifestDreadChoice { player: p, cards } => {
+            WaitingFor::ManifestDreadChoice {
+                player: p, cards, ..
+            } => {
                 assert_eq!(*p, player);
                 assert_eq!(cards.len(), 2);
                 assert_eq!(*cards, top_2);
