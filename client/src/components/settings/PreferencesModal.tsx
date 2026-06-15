@@ -252,9 +252,9 @@ export function PreferencesModal({
       subtitle={t("modal.subtitle")}
       onClose={onClose}
       maxWidthClassName="max-w-5xl"
-      bodyClassName="flex flex-col overflow-y-auto p-4 sm:p-6"
+      bodyClassName="flex min-h-0 flex-1 flex-col overflow-hidden pl-4 pt-4 pr-1.5 pb-8 sm:pl-6 sm:pt-6 sm:pr-2 sm:pb-10"
     >
-      <div className="flex flex-1 flex-col gap-4 md:min-h-[28rem] md:flex-row md:items-stretch">
+      <div className="flex min-h-0 flex-1 flex-col gap-4 md:min-h-[28rem] md:flex-row md:overflow-hidden">
             <aside className="flex shrink-0 flex-col md:w-[200px] md:justify-between">
               <nav className="flex snap-x gap-2 overflow-x-auto pb-1 md:flex-col md:overflow-visible md:pb-0">
                 {SETTINGS_TABS.map((tab) => (
@@ -276,7 +276,7 @@ export function PreferencesModal({
               </div>
             </aside>
 
-            <div className="flex min-w-0 flex-1 flex-col gap-4">
+            <div className="thin-scrollbar flex min-h-0 min-w-0 flex-1 flex-col gap-4 overflow-y-auto pb-4 pr-3 md:pr-4">
               {activeTab === "gameplay" && (
                 <SettingsSection title={t("gameplay.title")}>
                   <SettingGroup label={t("gameplay.language")}>
