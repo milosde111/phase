@@ -12780,6 +12780,14 @@ fn try_parse_counter_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinit
         def.valid_card = Some(filter);
     }
 
+    // CR 603.2c: "one or more counters are put on …" batches simultaneous
+    // CounterAdded events into a single trigger firing. The generic subject+verb
+    // path stamps this via `is_batched`, but counter triggers take an early
+    // return above that logic (mirrors the Milled batched path).
+    if scan_contains(lower, "one or more ") {
+        def.batched = true;
+    }
+
     Some((TriggerMode::CounterAdded, def))
 }
 
@@ -12897,9 +12905,14 @@ fn try_parse_counter_removed(lower: &str) -> Option<(TriggerMode, TriggerDefinit
         def.valid_card = Some(filter);
     }
 
-    // Set counter type as description metadata (the counter_filter field could be extended
-    // but for now the type info is captured in the description)
-    if !counter_type.is_empty() {
+    // CR 122.1: Wire the typed counter filter so match_counter_removed fires
+    // only on the named counter kind (mirrors coin_flip_result / die_result).
+    if let Some(parsed_type) = crate::types::counter::try_parse_counter_type(counter_type) {
+        def.counter_filter = Some(CounterTriggerFilter {
+            counter_type: parsed_type,
+            threshold: None,
+        });
+    } else if !counter_type.is_empty() {
         def.description = Some(format!("{counter_type} counter"));
     }
 
@@ -17264,6 +17277,10 @@ mod tests {
         );
         assert_eq!(def.mode, TriggerMode::CounterAdded);
         assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert!(
+            def.batched,
+            "\"one or more\" counter trigger must stamp batched"
+        );
     }
 
     // --- Constraint parsing tests ---
@@ -19605,6 +19622,10 @@ mod tests {
             crate::types::counter::CounterType::Minus1Minus1
         );
         assert_eq!(filter.threshold, None, "no threshold form here");
+        assert!(
+            def.batched,
+            "\"one or more\" counter trigger must stamp batched"
+        );
     }
 
     #[test]
@@ -19620,6 +19641,36 @@ mod tests {
             def.counter_filter.is_none(),
             "generic counter trigger must not set a type filter"
         );
+        assert!(
+            def.batched,
+            "\"one or more\" counter trigger must stamp batched"
+        );
+    }
+
+    #[test]
+    fn counter_added_passive_one_or_more_batched() {
+        // Auntie Ool / Hapatra passive-voice shape: "one or more [type] counters
+        // are put on [subject]" — early-return counter path must still batch.
+        let def = parse_trigger_line(
+            "Whenever one or more -1/-1 counters are put on a creature, draw a card.",
+            "Auntie Ool, Cursewretch",
+        );
+        assert_eq!(def.mode, TriggerMode::CounterAdded);
+        assert!(def.batched);
+        assert_eq!(
+            def.counter_filter.as_ref().map(|f| f.counter_type.clone()),
+            Some(crate::types::counter::CounterType::Minus1Minus1)
+        );
+    }
+
+    #[test]
+    fn counter_added_single_counter_not_batched() {
+        let def = parse_trigger_line(
+            "Whenever a +1/+1 counter is put on ~, you gain 1 life.",
+            "Test Card",
+        );
+        assert_eq!(def.mode, TriggerMode::CounterAdded);
+        assert!(!def.batched);
     }
 
     #[test]
@@ -29358,6 +29409,10 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::CounterRemoved);
         assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
         assert_eq!(def.trigger_zones, vec![Zone::Exile]);
+        assert_eq!(
+            def.counter_filter.as_ref().map(|f| f.counter_type.clone()),
+            Some(crate::types::counter::CounterType::Time)
+        );
     }
 
     #[test]
@@ -29371,6 +29426,10 @@ mod tests {
         assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
         // No zone constraint — fires from default zones
         assert_eq!(def.trigger_zones, vec![Zone::Battlefield]);
+        assert_eq!(
+            def.counter_filter.as_ref().map(|f| f.counter_type.clone()),
+            Some(crate::types::counter::CounterType::Time)
+        );
     }
 
     // -----------------------------------------------------------------------
